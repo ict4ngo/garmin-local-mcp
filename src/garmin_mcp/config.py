@@ -51,10 +51,13 @@ def _resolve_path_or_default(raw: str | os.PathLike, source: str) -> Path:
 
 VALID_UNITS = ("metric", "statute")
 
+DEFAULT_DATABASE_URL = "postgresql://garmin:garmin@localhost:5432/garmin"
+
 
 @dataclass(frozen=True)
 class Config:
     data_dir: Path
+    database_url: str
     timezone: str | None  # None = use system timezone
     units: str
     request_delay_seconds: float
@@ -63,10 +66,6 @@ class Config:
     @property
     def config_path(self) -> Path:
         return self.data_dir / "config.toml"
-
-    @property
-    def db_path(self) -> Path:
-        return self.data_dir / "garmin.db"
 
     @property
     def raw_dir(self) -> Path:
@@ -107,8 +106,15 @@ def load(data_dir: str | os.PathLike | None = None) -> Config:
     if units not in VALID_UNITS:
         raise ValueError(f"config units must be one of {VALID_UNITS}, got {units!r}")
 
+    database_url = (
+        os.environ.get("GARMIN_MCP_DATABASE_URL")
+        or str(file_cfg.get("database_url", "")).strip()
+        or DEFAULT_DATABASE_URL
+    )
+
     return Config(
         data_dir=base,
+        database_url=database_url,
         timezone=file_cfg.get("timezone"),
         units=units,
         request_delay_seconds=float(file_cfg.get("request_delay_seconds", 1.0)),

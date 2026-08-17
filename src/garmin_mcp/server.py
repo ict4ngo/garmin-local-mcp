@@ -1,4 +1,4 @@
-"""FastMCP stdio server: 12 compact tools over the local warehouse.
+"""FastMCP server: 12 compact tools over the local warehouse.
 
 Responses are deliberately compact (typically well under 2KB): columnar
 tables, server-side aggregates, and row caps instead of raw API payloads, so
@@ -7,12 +7,15 @@ any question fits in a single tool call without flooding the model's context.
 The server never prompts. Auth problems come back as structured
 {"error", "hint"} dicts pointing at the login CLI, and every analysis tool
 works fully offline over already-synced history.
+
+Transports: stdio (default, for local MCP hosts) and streamable-http for a
+long-running homelab server behind an authenticating reverse proxy.
 """
 
 from __future__ import annotations
 
 import functools
-import sqlite3
+import os
 from collections.abc import Callable
 from contextlib import closing
 from datetime import date as date_type
@@ -24,13 +27,23 @@ from mcp.server.fastmcp import FastMCP
 from . import analysis, auth, config, db, demo, importer
 from . import sync as sync_engine
 from .config import Config
+from .db import Connection
 
 SYNC_MAX_DAYS = 60
 DEFAULT_RANGE_DAYS = 30
 
 _TABLES = ("daily_wellness", "sleep", "hrv", "training_status", "activities")
 
-mcp = FastMCP("garmin")
+# HTTP bind address only matters for the streamable-http transport; stdio
+# ignores it. Defaults suit a container reached through a reverse proxy.
+mcp = FastMCP(
+    "garmin",
+    host=os.environ.get("GARMIN_MCP_HTTP_HOST", "0.0.0.0"),  # noqa: S104 - container default
+    port=int(os.environ.get("GARMIN_MCP_HTTP_PORT", "8080")),
+    # No server-side session state: every request stands alone, so restarts
+    # and proxy retries never strand a client mid-session.
+    stateless_http=True,
+)
 
 _config: Config | None = None
 
@@ -43,10 +56,10 @@ def _cfg() -> Config:
     return _config
 
 
-def _connect(cfg: Config) -> sqlite3.Connection:
-    # One short-lived connection per call: sqlite connections are cheap and
-    # this avoids stale handles across a long-running server process.
-    return db.connect(cfg.db_path)
+def _connect(cfg: Config) -> Connection:
+    # One short-lived connection per call keeps the server stateless; Postgres
+    # connections are cheap to establish on a local network.
+    return db.connect(cfg.database_url)
 
 
 def _default_range(cfg: Config, start: str | None, end: str | None) -> tuple[str, str]:
@@ -128,18 +141,21 @@ def sync_status() -> dict:
     with closing(_connect(cfg)) as conn:
         coverage = {}
         for table in _TABLES:
-            first, last, count = conn.execute(
-                f"SELECT MIN(date), MAX(date), COUNT(*) FROM {table}"  # noqa: S608
+            row = conn.execute(
+                f"SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS n "  # noqa: S608
+                f"FROM {table}"
             ).fetchone()
-            coverage[table] = {"rows": count, "first": first, "last": last}
-        last_sync = conn.execute("SELECT MAX(updated_at) FROM sync_state").fetchone()[0]
+            coverage[table] = {"rows": row["n"], "first": row["first"], "last": row["last"]}
+        last_sync = conn.execute(
+            "SELECT MAX(updated_at) AS last_sync FROM sync_state"
+        ).fetchone()["last_sync"]
         errors = conn.execute(
             "SELECT endpoint, date, last_error FROM sync_state "
             "WHERE status='error' ORDER BY date DESC, endpoint LIMIT 10"
         ).fetchall()
         n_errors = conn.execute(
-            "SELECT COUNT(*) FROM sync_state WHERE status='error'"
-        ).fetchone()[0]
+            "SELECT COUNT(*) AS n FROM sync_state WHERE status='error'"
+        ).fetchone()["n"]
         # Surfaced so an assistant never reports generated numbers as real
         # measurements. Absent for normal stores.
         generated = demo.is_demo(conn)
@@ -276,7 +292,7 @@ def get_activity(activity_id: int) -> dict:
     """
     with closing(_connect(_cfg())) as conn:
         row = conn.execute(
-            "SELECT * FROM activities WHERE activity_id=?", (activity_id,)
+            "SELECT * FROM activities WHERE activity_id=%s", (activity_id,)
         ).fetchone()
     if row is None:
         return {"error": f"No activity with id {activity_id}"}
@@ -294,7 +310,9 @@ def gaps(start: str | None = None, end: str | None = None) -> dict:
     cfg = _cfg()
     with closing(_connect(cfg)) as conn:
         if start is None:
-            start = conn.execute("SELECT MIN(date) FROM sync_state").fetchone()[0]
+            start = conn.execute(
+                "SELECT MIN(date) AS first FROM sync_state"
+            ).fetchone()["first"]
             if start is None:
                 raise ValueError("No synced data yet - run the sync tool or CLI first")
         end = end or sync_engine.yesterday(cfg)
@@ -315,10 +333,12 @@ def import_fit(folder: str) -> dict:
         return importer.import_bundle(conn, Path(folder))
 
 
-def serve(cfg: Config | None = None) -> int:
-    """Run the stdio MCP server (blocks until the client disconnects)."""
+def serve(cfg: Config | None = None, transport: str = "stdio") -> int:
+    """Run the MCP server (blocks until the client disconnects)."""
     global _config
     if cfg is not None:
         _config = cfg
-    mcp.run(transport="stdio")
+    if transport not in ("stdio", "streamable-http"):
+        raise ValueError(f"transport must be stdio or streamable-http, got {transport!r}")
+    mcp.run(transport=transport)
     return 0

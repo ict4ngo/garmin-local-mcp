@@ -98,8 +98,10 @@ def seed(conn) -> None:
 
 
 @pytest.fixture
-def conn(tmp_path):
-    conn = db.connect(tmp_path / "garmin.db")
+def conn(db_url):
+    conn = db.connect(db_url)
+    db.drop_all(conn)
+    db.migrate(conn)
     seed(conn)
     yield conn
     conn.close()

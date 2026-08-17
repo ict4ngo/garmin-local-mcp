@@ -1,0 +1,8 @@
+# Sync container schedule (supercronic). Times are container-local; set TZ in
+# the compose environment to shift them.
+#
+# m   h  dom mon dow  command
+15    4  *   *   *    /app/docker/sync.sh nightly
+30    4  *   *   0    /app/docker/sync.sh deep
+# Retention: drop raw snapshots older than 5 years (PLAN.md decision D).
+0     5  *   *   *    garmin-local-mcp prune --years 5

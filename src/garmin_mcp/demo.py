@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import math
 import random
-import sqlite3
 from datetime import date as date_type
 from datetime import timedelta
 
 from . import db
+from .db import Connection
 
 DEMO_DAYS = 180
 DEMO_SEED = 20260803
@@ -51,7 +51,7 @@ def _dates(end: date_type, days: int) -> list[date_type]:
 
 
 def generate(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     days: int = DEMO_DAYS,
     end: str | None = None,
@@ -304,23 +304,24 @@ def generate(
 
 
 def _record_provenance(
-    conn: sqlite3.Connection, days: int, start: date_type, end: date_type, seed: int
+    conn: Connection, days: int, start: date_type, end: date_type, seed: int
 ) -> None:
     """Mark the store as generated, so it can never be mistaken for real data."""
-    with conn:
+    with conn.transaction():
         conn.execute(
             "CREATE TABLE IF NOT EXISTS demo_info ("
-            "generated_at TEXT, days INT, start TEXT, end TEXT, seed INT)"
+            "generated_at TEXT, days INTEGER, range_start TEXT, range_end TEXT, seed INTEGER)"
         )
         conn.execute("DELETE FROM demo_info")
         conn.execute(
-            "INSERT INTO demo_info (generated_at, days, start, end, seed) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO demo_info (generated_at, days, range_start, range_end, seed) "
+            "VALUES (%s, %s, %s, %s, %s)",
             (db.utcnow(), days, start.isoformat(), end.isoformat(), seed),
         )
 
 
-def is_demo(conn: sqlite3.Connection) -> bool:
+def is_demo(conn: Connection) -> bool:
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='demo_info'"
+        "SELECT 1 AS one FROM information_schema.tables WHERE table_name='demo_info'"
     ).fetchone()
     return row is not None

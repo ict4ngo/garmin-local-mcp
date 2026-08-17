@@ -1,6 +1,6 @@
 """Server-side analysis over the local warehouse.
 
-Pure functions on a sqlite3.Connection: trends, correlations, baselines,
+Pure functions on a psycopg connection: trends, correlations, baselines,
 anomalies, and compact day/activity views. All metric names resolve through
 the registry in :mod:`metrics`, all math is stdlib, and every function returns
 plain JSON-able dicts sized for a single MCP tool response.
@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 from datetime import date as date_type
 from datetime import timedelta
 
+from .db import Connection
 from .metrics import Metric, resolve
 
 AGGREGATES = ("daily", "weekly", "monthly")
@@ -120,7 +120,7 @@ Series = dict[str, float]  # date -> value (non-null only)
 
 
 def _series_by_metric(
-    conn: sqlite3.Connection, resolved: list[Metric], start: str, end: str
+    conn: Connection, resolved: list[Metric], start: str, end: str
 ) -> dict[str, Series]:
     """Per-metric date->value maps, one query per source table.
 
@@ -134,7 +134,7 @@ def _series_by_metric(
     out: dict[str, Series] = {m.name: {} for m in resolved}
     for table, table_metrics in by_table.items():
         selects = ", ".join(f"{m.expr} AS c{i}" for i, m in enumerate(table_metrics))
-        sql = f"SELECT date, {selects} FROM {table} WHERE date BETWEEN ? AND ?"  # noqa: S608
+        sql = f"SELECT date, {selects} FROM {table} WHERE date BETWEEN %s AND %s"  # noqa: S608
         if table == "activities":
             sql += " GROUP BY date"
         for row in conn.execute(sql, (start, end)):
@@ -178,7 +178,7 @@ def _describe(values: list[float]) -> dict:
 
 
 def query_metrics(
-    conn: sqlite3.Connection,
+    conn: Connection,
     metrics: list[str],
     start: str,
     end: str,
@@ -228,7 +228,7 @@ def query_metrics(
 
 
 def correlate(
-    conn: sqlite3.Connection,
+    conn: Connection,
     metric_a: str,
     metric_b: str,
     start: str,
@@ -292,9 +292,11 @@ def correlate(
     }
 
 
-def _latest_date(conn: sqlite3.Connection, tables: set[str]) -> str | None:
+def _latest_date(conn: Connection, tables: set[str]) -> str | None:
     latest = [
-        conn.execute(f"SELECT MAX(date) FROM {table}").fetchone()[0]  # noqa: S608
+        conn.execute(f"SELECT MAX(date) AS latest FROM {table}").fetchone()[  # noqa: S608
+            "latest"
+        ]
         for table in sorted(tables)
     ]
     dates = [d for d in latest if d is not None]
@@ -302,7 +304,7 @@ def _latest_date(conn: sqlite3.Connection, tables: set[str]) -> str | None:
 
 
 def baselines(
-    conn: sqlite3.Connection,
+    conn: Connection,
     metrics: list[str] | None,
     window_days: int,
     end: str | None = None,
@@ -355,7 +357,7 @@ def baselines(
 
 
 def anomalies(
-    conn: sqlite3.Connection,
+    conn: Connection,
     metrics: list[str] | None,
     start: str,
     end: str,
@@ -422,13 +424,13 @@ def anomalies(
     return {"anomalies": found, "streaks": streaks}
 
 
-def get_day(conn: sqlite3.Connection, date: str) -> dict:
+def get_day(conn: Connection, date: str) -> dict:
     """One merged, compact view of a single day across every table."""
     _parse_date(date)
 
     def row_slice(table: str, drop: tuple[str, ...] = ()) -> dict:
         row = conn.execute(
-            f"SELECT * FROM {table} WHERE date=?", (date,)  # noqa: S608 - fixed names
+            f"SELECT * FROM {table} WHERE date=%s", (date,)  # noqa: S608 - fixed names
         ).fetchone()
         if row is None:
             return {}
@@ -437,14 +439,15 @@ def get_day(conn: sqlite3.Connection, date: str) -> dict:
 
     sleep = row_slice("sleep", drop=("quality_flags",))
     flags_json = conn.execute(
-        "SELECT quality_flags FROM sleep WHERE date=?", (date,)
+        "SELECT quality_flags FROM sleep WHERE date=%s", (date,)
     ).fetchone()
-    flags = json.loads(flags_json[0]) if flags_json and flags_json[0] else []
+    raw_flags = flags_json["quality_flags"] if flags_json else None
+    flags = json.loads(raw_flags) if raw_flags else []
 
     activities = [
         {k: row[k] for k in ("activity_id", "name", "type", "duration_s", "distance_m", "avg_hr")}
         for row in conn.execute(
-            "SELECT * FROM activities WHERE date=? ORDER BY start_ts, activity_id", (date,)
+            "SELECT * FROM activities WHERE date=%s ORDER BY start_ts, activity_id", (date,)
         )
     ]
     return {
@@ -465,7 +468,7 @@ _ACTIVITY_COLS = (
 
 
 def list_activities(
-    conn: sqlite3.Connection,
+    conn: Connection,
     type: str | None = None,  # noqa: A002 - mirrors the MCP tool argument name
     start: str | None = None,
     end: str | None = None,
@@ -477,23 +480,23 @@ def list_activities(
         raise ValueError(f"limit must be at least 1, got {limit}")
     clauses, params = [], []
     if type is not None:
-        clauses.append("type = ?")
+        clauses.append("type = %s")
         params.append(type)
     if start is not None:
         _parse_date(start, "start")
-        clauses.append("date >= ?")
+        clauses.append("date >= %s")
         params.append(start)
     if end is not None:
         _parse_date(end, "end")
-        clauses.append("date <= ?")
+        clauses.append("date <= %s")
         params.append(end)
     if min_distance_m is not None:
-        clauses.append("distance_m >= ?")
+        clauses.append("distance_m >= %s")
         params.append(min_distance_m)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
         f"SELECT {', '.join(_ACTIVITY_COLS)} FROM activities{where} "  # noqa: S608
-        f"ORDER BY date DESC, start_ts DESC LIMIT ?"
+        f"ORDER BY date DESC, start_ts DESC LIMIT %s"
     )
     rows = conn.execute(sql, (*params, limit + 1)).fetchall()
     truncated = len(rows) > limit
@@ -506,16 +509,16 @@ def list_activities(
     }
 
 
-def gaps(conn: sqlite3.Connection, start: str, end: str) -> dict:
+def gaps(conn: Connection, start: str, end: str) -> dict:
     """Missing days per daily table plus unresolved sync errors in the range."""
     _validate_range(start, end)
     all_days = set(_dates(start, end))
     missing: dict[str, list[str]] = {}
     for table in _DAILY_TABLES:
         have = {
-            row[0]
+            row["date"]
             for row in conn.execute(
-                f"SELECT date FROM {table} WHERE date BETWEEN ? AND ?",  # noqa: S608
+                f"SELECT date FROM {table} WHERE date BETWEEN %s AND %s",  # noqa: S608
                 (start, end),
             )
         }
@@ -524,7 +527,7 @@ def gaps(conn: sqlite3.Connection, start: str, end: str) -> dict:
         {"endpoint": row["endpoint"], "date": row["date"], "error": row["last_error"]}
         for row in conn.execute(
             "SELECT endpoint, date, last_error FROM sync_state "
-            "WHERE status='error' AND date BETWEEN ? AND ? ORDER BY date, endpoint",
+            "WHERE status='error' AND date BETWEEN %s AND %s ORDER BY date, endpoint",
             (start, end),
         )
     ]

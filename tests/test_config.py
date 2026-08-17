@@ -1,18 +1,19 @@
 from pathlib import Path
 
-from garmin_mcp.config import DEFAULT_DATA_DIR, load
+from garmin_mcp.config import DEFAULT_DATA_DIR, DEFAULT_DATABASE_URL, load
 
 
 def test_defaults(tmp_path, monkeypatch):
     monkeypatch.delenv("GARMIN_MCP_DATA_DIR", raising=False)
     monkeypatch.delenv("GARMINTOKENS", raising=False)
+    monkeypatch.delenv("GARMIN_MCP_DATABASE_URL", raising=False)
     cfg = load(tmp_path)
     assert cfg.data_dir == tmp_path
     assert cfg.units == "metric"
     assert cfg.request_delay_seconds == 1.0
     assert cfg.baseline_window_days == 28
     assert cfg.timezone is None
-    assert cfg.db_path == tmp_path / "garmin.db"
+    assert cfg.database_url == DEFAULT_DATABASE_URL
     assert cfg.raw_dir == tmp_path / "raw"
     assert cfg.tokens_dir == tmp_path / "tokens"
 
@@ -56,15 +57,27 @@ def test_tokens_env_literal_template_falls_back(tmp_path, monkeypatch):
 
 def test_config_toml(tmp_path, monkeypatch):
     monkeypatch.delenv("GARMINTOKENS", raising=False)
+    monkeypatch.delenv("GARMIN_MCP_DATABASE_URL", raising=False)
     (tmp_path / "config.toml").write_text(
         'timezone = "America/New_York"\nunits = "statute"\n'
         "request_delay_seconds = 2.5\nbaseline_window_days = 14\n"
+        'database_url = "postgresql://u:p@dbhost:5432/garmin"\n'
     )
     cfg = load(tmp_path)
     assert cfg.timezone == "America/New_York"
     assert cfg.units == "statute"
     assert cfg.request_delay_seconds == 2.5
     assert cfg.baseline_window_days == 14
+    assert cfg.database_url == "postgresql://u:p@dbhost:5432/garmin"
+
+
+def test_database_url_env_beats_toml(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_text(
+        'database_url = "postgresql://u:p@dbhost:5432/garmin"\n'
+    )
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", "postgresql://u:p@other:5432/garmin")
+    cfg = load(tmp_path)
+    assert cfg.database_url == "postgresql://u:p@other:5432/garmin"
 
 
 def test_tokens_env_override(tmp_path, monkeypatch):

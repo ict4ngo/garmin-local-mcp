@@ -11,14 +11,14 @@ license = "MIT"
 requires-python = ">=3.12"
 authors = [{ name = "Anup Shesh" }]
 keywords = [
-    "garmin",
-    "garmin-connect",
-    "mcp",
-    "model-context-protocol",
-    "health",
-    "fitness",
-    "sqlite",
-    "quantified-self",
+  "garmin",
+  "garmin-connect",
+  "mcp",
+  "model-context-protocol",
+  "health",
+  "fitness",
+  "postgresql",
+  "quantified-self",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -34,6 +34,8 @@ dependencies = [
     "mcp>=1.0,<2",
     "garminconnect>=0.3.6,<0.4",
     "fitparse>=1.2",
+    # [binary] ships a self-contained libpq so no system packages are needed.
+    "psycopg[binary]>=3.1",
     # zoneinfo has no bundled tz database on Windows
     "tzdata; sys_platform == 'win32'",
 ]

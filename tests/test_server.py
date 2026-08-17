@@ -23,14 +23,19 @@ EXPECTED_TOOLS = {
 
 
 @pytest.fixture
-def data_dir(tmp_path, monkeypatch):
+def data_dir(tmp_path, monkeypatch, db_url):
     monkeypatch.setenv("GARMIN_MCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", db_url)
     monkeypatch.setattr(server, "_config", None)  # drop any cached config
+    conn = db.connect(db_url)
+    db.drop_all(conn)
+    db.migrate(conn)
+    conn.close()
     return tmp_path
 
 
-def seed_month(data_dir) -> None:
-    conn = db.connect(data_dir / "garmin.db")
+def seed_month(db_url) -> None:
+    conn = db.connect(db_url)
     for i in range(30):
         d = (BASE + timedelta(days=i)).isoformat()
         db.upsert(
@@ -72,8 +77,8 @@ def test_sync_rejects_inverted_range(data_dir):
     assert "after" in res["error"]
 
 
-def test_query_metrics_weekly_response_is_compact(data_dir):
-    seed_month(data_dir)
+def test_query_metrics_weekly_response_is_compact(data_dir, db_url):
+    seed_month(db_url)
     res = server.query_metrics(
         ["resting_hr", "sleep_score"], "2026-06-01", "2026-06-30",
         aggregate="weekly", stats=True,
@@ -100,8 +105,8 @@ def test_get_activity_unknown_id(data_dir):
     assert res == {"error": "No activity with id 999"}
 
 
-def test_gaps_defaults_to_first_synced_date(data_dir):
-    seed_month(data_dir)
+def test_gaps_defaults_to_first_synced_date(data_dir, db_url):
+    seed_month(db_url)
     res = server.gaps(end="2026-06-30")
     assert res["start"] == "2026-06-01"
     assert res["missing"]["daily_wellness"] == []
@@ -113,15 +118,15 @@ def test_gaps_without_any_sync(data_dir):
     assert "sync" in res["error"]
 
 
-def test_baselines_uses_config_default_window(data_dir):
-    seed_month(data_dir)
+def test_baselines_uses_config_default_window(data_dir, db_url):
+    seed_month(db_url)
     res = server.baselines(metrics=["resting_hr"])
     assert res["window_days"] == 28  # config default
     assert res["metrics"]["resting_hr"]["n"] == 28
 
 
-def test_sync_status_reports_coverage(data_dir):
-    seed_month(data_dir)
+def test_sync_status_reports_coverage(data_dir, db_url):
+    seed_month(db_url)
     res = server.sync_status()
     assert res["coverage"]["daily_wellness"]["rows"] == 30
     assert res["coverage"]["daily_wellness"]["first"] == "2026-06-01"
@@ -135,8 +140,8 @@ def test_import_fit_bad_folder_is_a_structured_error(data_dir, tmp_path):
     assert "error" in res
 
 
-def test_responses_json_serialize(data_dir):
-    seed_month(data_dir)
+def test_responses_json_serialize(data_dir, db_url):
+    seed_month(db_url)
     for res in (
         server.sync_status(),
         server.get_day("2026-06-05"),

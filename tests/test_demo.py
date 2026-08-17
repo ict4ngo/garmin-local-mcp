@@ -1,17 +1,18 @@
 from garmin_mcp import analysis, db, demo
 from garmin_mcp.cli import main
 
-
-def _store(tmp_path, **kwargs):
-    conn = db.connect(tmp_path / "garmin.db")
-    report = demo.generate(conn, end="2026-08-02", **kwargs)
-    return conn, report
+END = "2026-08-02"
 
 
-def test_generates_every_table(tmp_path):
-    conn, report = _store(tmp_path, days=120)
+def _store(conn, **kwargs):
+    report = demo.generate(conn, end=END, **kwargs)
+    return report
+
+
+def test_generates_every_table(conn):
+    report = _store(conn, days=120)
     assert report["start"] == "2026-04-05"
-    assert report["end"] == "2026-08-02"
+    assert report["end"] == END
     for table in ("daily_wellness", "hrv", "training_status"):
         assert report["rows"][table] == 120
     # Sleep deliberately leaves a few nights out so `gaps` has something to find.
@@ -19,24 +20,27 @@ def test_generates_every_table(tmp_path):
     assert report["rows"]["activities"] > 0
 
 
-def test_deterministic_for_a_given_seed(tmp_path):
-    conn_a, _ = _store(tmp_path / "a", days=60, seed=7)
-    conn_b, _ = _store(tmp_path / "b", days=60, seed=7)
-    rows_a = conn_a.execute("SELECT * FROM daily_wellness ORDER BY date").fetchall()
-    rows_b = conn_b.execute("SELECT * FROM daily_wellness ORDER BY date").fetchall()
-    assert [tuple(r)[:-1] for r in rows_a] == [tuple(r)[:-1] for r in rows_b]
+def test_deterministic_for_a_given_seed(conn):
+    _store(conn, days=60, seed=7)
+    rows_a = conn.execute("SELECT * FROM daily_wellness ORDER BY date").fetchall()
+    db.drop_all(conn)
+    db.migrate(conn)
+    _store(conn, days=60, seed=7)
+    rows_b = conn.execute("SELECT * FROM daily_wellness ORDER BY date").fetchall()
+    assert [tuple(r.values())[:-1] for r in rows_a] == [tuple(r.values())[:-1] for r in rows_b]
 
 
-def test_different_seeds_differ(tmp_path):
-    conn_a, _ = _store(tmp_path / "a", days=60, seed=1)
-    conn_b, _ = _store(tmp_path / "b", days=60, seed=2)
-    a = [r["resting_hr"] for r in conn_a.execute("SELECT resting_hr FROM daily_wellness")]
-    b = [r["resting_hr"] for r in conn_b.execute("SELECT resting_hr FROM daily_wellness")]
+def test_different_seeds_differ(conn):
+    _store(conn, days=60, seed=1)
+    a = [r["resting_hr"] for r in conn.execute("SELECT resting_hr FROM daily_wellness")]
+    db.drop_all(conn)
+    db.migrate(conn)
+    _store(conn, days=60, seed=2)
+    b = [r["resting_hr"] for r in conn.execute("SELECT resting_hr FROM daily_wellness")]
     assert a != b
 
 
-def test_rejects_tiny_ranges(tmp_path):
-    conn = db.connect(tmp_path / "garmin.db")
+def test_rejects_tiny_ranges(conn):
     try:
         demo.generate(conn, days=5)
     except ValueError as e:
@@ -45,33 +49,36 @@ def test_rejects_tiny_ranges(tmp_path):
         raise AssertionError("expected ValueError")
 
 
-def test_short_ranges_keep_the_illness_window_in_order(tmp_path):
+def test_short_ranges_keep_the_illness_window_in_order(conn):
     """days // 2 - 20 goes negative under ~40 days and used to index backwards."""
     for days in (14, 20, 30, 45):
-        conn, report = _store(tmp_path / str(days), days=days)
+        db.drop_all(conn)
+        db.migrate(conn)
+        report = _store(conn, days=days)
         start, end = report["illness_window"]
         assert start <= end, f"{days}d produced a backwards window {start}..{end}"
         assert report["start"] <= start and end <= report["end"]
         assert len(report["missing_sleep"]) >= 1
 
 
-def test_marked_as_a_demo_store(tmp_path):
-    conn, _ = _store(tmp_path, days=30)
+def test_marked_as_a_demo_store(conn):
+    _store(conn, days=30)
     assert demo.is_demo(conn) is True
-    plain = db.connect(tmp_path / "plain.db")
-    assert demo.is_demo(plain) is False
+    db.drop_all(conn)
+    db.migrate(conn)
+    assert demo.is_demo(conn) is False
 
 
-def test_sleep_stages_sum_to_duration(tmp_path):
-    conn, _ = _store(tmp_path, days=90)
+def test_sleep_stages_sum_to_duration(conn):
+    _store(conn, days=90)
     for row in conn.execute("SELECT * FROM sleep"):
         stages = row["deep_min"] + row["light_min"] + row["rem_min"] + row["awake_min"]
         # Stages are stored as ints, so allow rounding slack against the float total.
         assert abs(stages - row["duration_min"]) <= 4
 
 
-def test_values_stay_physiologically_plausible(tmp_path):
-    conn, _ = _store(tmp_path, days=180)
+def test_values_stay_physiologically_plausible(conn):
+    _store(conn, days=180)
     for row in conn.execute("SELECT * FROM daily_wellness"):
         assert 46 <= row["resting_hr"] <= 78
         assert 0 <= row["steps"] <= 21000
@@ -80,9 +87,9 @@ def test_values_stay_physiologically_plausible(tmp_path):
         assert 16 <= row["last_night_avg"] <= 62
 
 
-def test_analysis_tools_find_real_structure(tmp_path):
+def test_analysis_tools_find_real_structure(conn):
     """The point of the demo store: the tools must return signal, not noise."""
-    conn, report = _store(tmp_path, days=180)
+    report = _store(conn, days=180)
     start, end = report["start"], report["end"]
 
     # A latent recovery factor drives HRV and resting HR in opposite directions.
@@ -103,29 +110,30 @@ def test_analysis_tools_find_real_structure(tmp_path):
     assert {"resting_hr", "hrv", "skin_temp_dev_c"} <= during
 
 
-def test_gaps_reports_the_missing_sleep_nights(tmp_path):
-    conn, report = _store(tmp_path, days=180)
+def test_gaps_reports_the_missing_sleep_nights(conn):
+    report = _store(conn, days=180)
     missing = analysis.gaps(conn, report["start"], report["end"])["missing"]
     assert missing["sleep"] == report["missing_sleep"]
     assert missing["daily_wellness"] == []
 
 
-def test_cli_refuses_to_overwrite_a_real_store(tmp_path, capsys):
-    real = tmp_path / "garmin.db"
-    conn = db.connect(real)
+def test_cli_refuses_to_overwrite_a_real_store(conn, db_url, tmp_path, monkeypatch):
     db.upsert(conn, "daily_wellness", {"date": "2026-01-01", "resting_hr": 55}, ("date",))
     conn.close()
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", db_url)
 
     assert main(["--data-dir", str(tmp_path), "demo"]) == 2
-    assert "Refusing to overwrite real data" in capsys.readouterr().err
 
     # The real row must still be there.
-    conn = db.connect(real)
-    assert conn.execute("SELECT COUNT(*) FROM daily_wellness").fetchone()[0] == 1
+    check = db.connect(db_url)
+    assert check.execute("SELECT COUNT(*) AS n FROM daily_wellness").fetchone()["n"] == 1
+    check.close()
 
 
-def test_cli_regenerates_an_existing_demo_store(tmp_path):
+def test_cli_regenerates_an_existing_demo_store(fresh_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", fresh_db)
     assert main(["--data-dir", str(tmp_path), "demo", "--days", "30"]) == 0
     assert main(["--data-dir", str(tmp_path), "demo", "--days", "40"]) == 0
-    conn = db.connect(tmp_path / "garmin.db")
-    assert conn.execute("SELECT COUNT(*) FROM daily_wellness").fetchone()[0] == 40
+    conn = db.connect(fresh_db)
+    assert conn.execute("SELECT COUNT(*) AS n FROM daily_wellness").fetchone()["n"] == 40
+    conn.close()

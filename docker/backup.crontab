@@ -1,0 +1,4 @@
+# Backup container schedule (supercronic): nightly pg_dump + raw tar to NFS.
+#
+# m   h  dom mon dow  command
+30    3  *   *   *    /app/docker/backup.sh

@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
-from .db import upsert, utcnow
+from .db import Connection, upsert, utcnow
 
 
 def daily_path(raw_dir: Path, date: str, endpoint: str) -> Path:
@@ -28,7 +27,7 @@ def activity_path(raw_dir: Path, activity_id: int) -> Path:
 
 
 def write_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     raw_dir: Path,
     path: Path,
     payload: object,
@@ -46,7 +45,7 @@ def write_snapshot(
 
 
 def index_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     raw_dir: Path,
     path: Path,
     date: str | None,
@@ -82,3 +81,48 @@ def iter_daily_snapshots(raw_dir: Path) -> Iterator[tuple[str, str, Path]]:
     for day_dir in sorted(daily.glob("*/????-??-??")):
         for f in sorted(day_dir.glob("*.json")):
             yield day_dir.name, f.stem, f
+
+
+def prune_snapshots(
+    conn: Connection, raw_dir: Path, cutoff: str, dry_run: bool = False
+) -> dict:
+    """Delete raw snapshots (files + index rows) older than `cutoff` (YYYY-MM-DD).
+
+    Snapshots without a known date are kept. The warehouse tables are
+    untouched: pruned history stays queryable, it can only no longer be
+    rebuilt by `reparse`.
+    """
+    rows = conn.execute(
+        "SELECT path FROM raw_snapshots WHERE date IS NOT NULL AND date < %s "
+        "ORDER BY path",
+        (cutoff,),
+    ).fetchall()
+    removed_files = removed_rows = already_gone = 0
+    touched_dirs: set[Path] = set()
+    for row in rows:
+        path = raw_dir / row["path"]
+        if path.is_file():
+            if not dry_run:
+                path.unlink()
+            removed_files += 1
+            touched_dirs.add(path.parent)
+        else:
+            already_gone += 1
+        if not dry_run:
+            conn.execute("DELETE FROM raw_snapshots WHERE path=%s", (row["path"],))
+        removed_rows += 1
+    if not dry_run:
+        # Tidy up directories left empty by the prune (date dirs, then year dirs).
+        for d in sorted(touched_dirs, reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+                parent = d.parent
+                if parent != raw_dir and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+    return {
+        "cutoff": cutoff,
+        "dry_run": dry_run,
+        "removed_files": removed_files,
+        "removed_rows": removed_rows,
+        "already_gone": already_gone,
+    }

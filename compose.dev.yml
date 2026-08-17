@@ -1,0 +1,27 @@
+# Development PostgreSQL for local work and the test suite.
+#
+#   docker compose -f compose.dev.yml up -d      # start
+#   uv run pytest                                # tests use it automatically
+#
+# Tests create their own disposable database on this server
+# (GARMIN_MCP_TEST_ADMIN_DSN overrides the admin DSN if needed).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: garmin-mcp-dev-pg
+    environment:
+      POSTGRES_USER: garmin
+      POSTGRES_PASSWORD: garmin
+      POSTGRES_DB: garmin
+    ports:
+      - "5432:5432"
+    volumes:
+      - garmin-dev-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U garmin"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  garmin-dev-pgdata:

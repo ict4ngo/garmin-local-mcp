@@ -1,0 +1,111 @@
+# garmin-local-mcp homelab stack (see PLAN.md):
+#   postgres : dedicated warehouse database (decision A)
+#   app      : MCP server over streamable-http, internal network only
+#   caddy    : reverse proxy, basic auth + internal TLS (decision B)
+#   sync     : nightly cron sync + 5-year raw-snapshot prune (decision D)
+#   backup   : nightly pg_dump + raw tar to NFS (decision C)
+#
+# First run:
+#   cp .env.example .env    # then edit values (NFS address, credentials)
+#   docker compose up -d postgres app
+#   docker compose run --rm app login     # interactive Garmin login (MFA)
+#   docker compose up -d                  # start the rest
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-garmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-garmin}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-garmin}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # No published ports: reachable only on the compose network.
+
+  app:
+    build: .
+    image: garmin-local-mcp
+    restart: unless-stopped
+    command: ["serve", "--transport", "streamable-http"]
+    environment:
+      GARMIN_MCP_DATABASE_URL: >-
+        postgresql://${POSTGRES_USER:-garmin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-garmin}
+      GARMIN_MCP_HTTP_HOST: 0.0.0.0
+      GARMIN_MCP_HTTP_PORT: "8080"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - garmin-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # No published ports: reached only through caddy.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      MCP_HOSTNAME: ${MCP_HOSTNAME:-garmin-mcp.local}
+      MCP_BASIC_USER: ${MCP_BASIC_USER:?set MCP_BASIC_USER in .env}
+      MCP_BASIC_HASH: ${MCP_BASIC_HASH:?set MCP_BASIC_HASH in .env (caddy hash-password)}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "${MCP_HTTPS_PORT:-443}:443"
+    depends_on:
+      - app
+
+  sync:
+    image: garmin-local-mcp
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/supercronic"]
+    command: ["/app/docker/sync.crontab"]
+    environment:
+      GARMIN_MCP_DATABASE_URL: >-
+        postgresql://${POSTGRES_USER:-garmin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-garmin}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - garmin-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_started
+
+  backup:
+    image: garmin-local-mcp
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/supercronic"]
+    command: ["/app/docker/backup.crontab"]
+    environment:
+      GARMIN_MCP_DATABASE_URL: >-
+        postgresql://${POSTGRES_USER:-garmin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-garmin}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-31}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - garmin-data:/data:ro
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  garmin-data:
+  caddy_data:
+  caddy_config:
+  # NFS target for backups (decision C). Set NFS_ADDR / NFS_PATH in .env.
+  # If your homelab prefers a bind mount, replace this volume with a path.
+  backups:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=${NFS_ADDR:?set NFS_ADDR in .env},nolock,soft,rw
+      device: ":${NFS_PATH:?set NFS_PATH in .env}"

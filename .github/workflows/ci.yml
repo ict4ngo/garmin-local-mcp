@@ -13,6 +13,22 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: garmin
+          POSTGRES_PASSWORD: garmin
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U garmin"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      GARMIN_MCP_TEST_ADMIN_DSN: postgresql://garmin:garmin@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

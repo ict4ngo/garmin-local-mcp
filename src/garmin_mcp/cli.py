@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import psycopg
+
 from . import __version__
 from .config import load as load_config
 
@@ -16,7 +18,7 @@ from .config import load as load_config
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
 
-    return serve(args.config)
+    return serve(args.config, transport=args.transport)
 
 
 def cmd_login(args: argparse.Namespace) -> int:
@@ -62,7 +64,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(f"{e} ({e.hint})", file=sys.stderr)
         return 1
 
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     report = sync.sync_range(
         config, conn, client, start, end, endpoints=endpoints, force=args.force
     )
@@ -85,16 +87,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     from . import db
 
     config = args.config
-    if not config.db_path.is_file():
-        print(f"No database yet at {config.db_path} - run: garmin-local-mcp sync")
-        return 0
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     print(f"data dir: {config.data_dir}")
+    print(f"database: {config.database_url.split('@')[-1]}")
     print("coverage:")
     for table in ("daily_wellness", "sleep", "hrv", "training_status", "activities"):
-        first, last, count = conn.execute(
-            f"SELECT MIN(date), MAX(date), COUNT(*) FROM {table}"  # noqa: S608 - fixed names
+        row = conn.execute(
+            f"SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS n "  # noqa: S608
+            f"FROM {table}"
         ).fetchone()
+        first, last, count = row["first"], row["last"], row["n"]
         span = f"{first} .. {last}" if count else "(no data)"
         print(f"  {table:16} {count:6} rows  {span}")
     errors = conn.execute(
@@ -116,7 +118,7 @@ def cmd_import_fit(args: argparse.Namespace) -> int:
 
     config = args.config
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     try:
         report = import_bundle(conn, args.folder, force=args.force)
     except ValueError as e:
@@ -135,38 +137,35 @@ def cmd_demo(args: argparse.Namespace) -> int:
     from . import db, demo
 
     config = args.config
-    if config.db_path.is_file():
-        conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
+    if db.has_any_data(conn):
         # Never overwrite real data. A demo store may be regenerated freely.
         generated = demo.is_demo(conn)
-        conn.close()
         if not generated and not args.force:
             print(
-                f"{config.db_path} already exists and does not look like a demo store.\n"
-                f"Refusing to overwrite real data. Use a separate directory:\n"
-                f"  garmin-local-mcp --data-dir ~/.garmin-mcp-demo demo\n"
-                f"or pass --force if you are certain.",
+                f"{config.database_url} already holds data that does not look like "
+                "a demo store.\nRefusing to overwrite real data. Point the demo at "
+                "a separate database:\n"
+                "  GARMIN_MCP_DATABASE_URL=postgresql://.../garmin_demo "
+                "garmin-local-mcp demo\n"
+                "or pass --force if you are certain.",
                 file=sys.stderr,
             )
             return 2
-        config.db_path.unlink()
-        for suffix in ("-wal", "-shm"):
-            sidecar = config.db_path.with_name(config.db_path.name + suffix)
-            sidecar.unlink(missing_ok=True)
+    db.drop_all(conn)
+    db.migrate(conn)
 
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
     try:
         report = demo.generate(conn, days=args.days, end=args.end, seed=args.seed)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
     finally:
-        # Windows will not let the next run unlink the file otherwise.
         conn.close()
 
     total = sum(report["rows"].values())
-    print(f"Generated a demo store at {config.db_path}")
+    print(f"Generated a demo store at {config.database_url}")
     print(f"  {report['days']} days, {report['start']} .. {report['end']}, {total} rows")
     for table, count in report["rows"].items():
         print(f"    {table:16} {count:5}")
@@ -174,8 +173,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
     print(f"  seeded illness window: {ill_start} .. {ill_end}")
     print(f"  sleep nights left missing: {', '.join(report['missing_sleep'])}")
     print("\nThis data is generated, not recorded. Try:")
-    print(f"  garmin-local-mcp --data-dir {config.data_dir} status")
-    print(f"  garmin-local-mcp --data-dir {config.data_dir} serve   # then ask an MCP client")
+    print(f"garmin-local-mcp --data-dir {config.data_dir} status")
+    print(f"garmin-local-mcp --data-dir {config.data_dir} serve   # then ask an MCP client")
     return 0
 
 
@@ -184,10 +183,38 @@ def cmd_reparse(args: argparse.Namespace) -> int:
 
     config = args.config
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     report = sync.reparse(config, conn)
     if report["unknown_endpoints"]:
         print(f"skipped {report['unknown_endpoints']} snapshots from unknown endpoints")
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    from datetime import date
+
+    from . import db, raw
+
+    config = args.config
+    if args.years <= 0:
+        print(f"--years must be positive, got {args.years}", file=sys.stderr)
+        return 2
+    today = date.today()
+    try:
+        cutoff_date = today.replace(year=today.year - int(args.years))
+    except ValueError:  # Feb 29 in a non-leap cutoff year
+        cutoff_date = today.replace(year=today.year - int(args.years), day=28)
+    cutoff = cutoff_date.isoformat()
+
+    conn = db.connect(config.database_url)
+    report = raw.prune_snapshots(conn, config.raw_dir, cutoff, dry_run=args.dry_run)
+    verb = "would remove" if report["dry_run"] else "removed"
+    print(
+        f"prune older than {cutoff} ({args.years:g} years): "
+        f"{verb} {report['removed_files']} files, {report['removed_rows']} index rows"
+    )
+    if report["already_gone"]:
+        print(f"  ({report['already_gone']} index rows already had no file on disk)")
     return 0
 
 
@@ -207,7 +234,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("serve", help="Run the stdio MCP server (never prompts)")
+    p = sub.add_parser("serve", help="Run the MCP server (never prompts)")
+    p.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="stdio for local MCP hosts; streamable-http for a long-running server "
+        "behind a reverse proxy (bind address via GARMIN_MCP_HTTP_HOST/PORT)",
+    )
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("login", help="Interactive Garmin Connect login (supports MFA)")
@@ -248,6 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reparse", help="Rebuild the database from raw snapshots (offline)")
     p.set_defaults(func=cmd_reparse)
 
+    p = sub.add_parser(
+        "prune", help="Delete raw snapshots older than the retention window (default 5 years)"
+    )
+    p.add_argument("--years", type=float, default=5.0, help="Retention window in years")
+    p.add_argument("--dry-run", action="store_true", help="Report without deleting anything")
+    p.set_defaults(func=cmd_prune)
+
     return parser
 
 
@@ -255,7 +296,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.config = load_config(args.data_dir)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except psycopg.OperationalError as e:
+        print(
+            f"Cannot reach the warehouse database: {e}\n"
+            f"Check GARMIN_MCP_DATABASE_URL / database_url in "
+            f"{args.config.config_path} and that PostgreSQL is running.",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":

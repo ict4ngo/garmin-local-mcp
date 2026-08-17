@@ -1,17 +1,16 @@
-import sqlite3
+import psycopg
+import pytest
 
 from garmin_mcp import db
 
 
-def _connect(tmp_path):
-    return db.connect(tmp_path / "test.db")
-
-
-def test_schema_created(tmp_path):
-    conn = _connect(tmp_path)
+def test_schema_created(conn):
     tables = {
-        r["name"]
-        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        r["table_name"]
+        for r in conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='public'"
+        ).fetchall()
     }
     assert {
         "schema_version",
@@ -23,21 +22,27 @@ def test_schema_created(tmp_path):
         "raw_snapshots",
         "sync_state",
     } <= tables
-    version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+    version = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
     assert version == db.SCHEMA_VERSION
 
 
-def test_migrate_idempotent(tmp_path):
-    path = tmp_path / "test.db"
-    db.connect(path).close()
-    conn = db.connect(path)  # reopen: migrations must not re-apply
-    count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
+def test_migrate_idempotent(db_url):
+    db.connect(db_url).close()
+    conn = db.connect(db_url)  # reopen: migrations must not re-apply
+    count = conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()["n"]
     assert count == len(db.MIGRATIONS)
+    conn.close()
 
 
-def test_migration_v2_adds_fitness_age_columns(tmp_path):
-    conn = _connect(tmp_path)
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(training_status)")}
+def test_migration_v2_adds_fitness_age_columns(db_url):
+    conn = db.connect(db_url)
+    cols = {
+        r["column_name"]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='training_status'"
+        )
+    }
     assert {"fitness_age", "achievable_fitness_age"} <= cols
     assert db.SCHEMA_VERSION == 2
     # data written after migration survives a re-open (migrations never re-apply)
@@ -48,14 +53,14 @@ def test_migration_v2_adds_fitness_age_columns(tmp_path):
         ("date",),
     )
     conn.close()
-    conn = db.connect(tmp_path / "test.db")
+    conn = db.connect(db_url)
     row = conn.execute("SELECT * FROM training_status").fetchone()
     assert row["vo2max"] == 47.3 and row["fitness_age"] == 41.23
     assert row["achievable_fitness_age"] is None
+    conn.close()
 
 
-def test_upsert_overwrites_non_key_cols(tmp_path):
-    conn = _connect(tmp_path)
+def test_upsert_overwrites_non_key_cols(conn):
     row = {"date": "2026-07-01", "resting_hr": 56, "steps": 5000, "source": "api"}
     db.upsert(conn, "daily_wellness", row, ("date",))
     db.upsert(conn, "daily_wellness", {**row, "resting_hr": 58}, ("date",))
@@ -65,20 +70,14 @@ def test_upsert_overwrites_non_key_cols(tmp_path):
     assert got[0]["steps"] == 5000
 
 
-def test_source_check_constraint(tmp_path):
-    conn = _connect(tmp_path)
-    try:
+def test_source_check_constraint(conn):
+    with pytest.raises(psycopg.errors.CheckViolation):
         db.upsert(
             conn, "daily_wellness", {"date": "2026-07-01", "source": "chrome"}, ("date",)
         )
-        raised = False
-    except sqlite3.IntegrityError:
-        raised = True
-    assert raised
 
 
-def test_sync_state(tmp_path):
-    conn = _connect(tmp_path)
+def test_sync_state(conn):
     assert not db.synced_ok(conn, "sleep", "2026-07-01")
     db.mark_sync(conn, "sleep", "2026-07-01", "error", "boom")
     assert not db.synced_ok(conn, "sleep", "2026-07-01")
@@ -88,3 +87,12 @@ def test_sync_state(tmp_path):
     assert row["attempts"] == 2
     db.mark_sync(conn, "hrv", "2026-07-01", "empty")
     assert db.synced_ok(conn, "hrv", "2026-07-01")
+
+
+def test_drop_all_and_migrate_recreates_empty_schema(conn):
+    db.upsert(conn, "daily_wellness", {"date": "2026-07-01", "source": "api"}, ("date",))
+    db.drop_all(conn)
+    db.migrate(conn)
+    assert db.has_any_data(conn) is False
+    version = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
+    assert version == db.SCHEMA_VERSION

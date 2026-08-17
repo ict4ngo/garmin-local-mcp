@@ -1,0 +1,16 @@
+# Reverse proxy in front of the MCP HTTP endpoint (PLAN.md decision B).
+# Basic auth terminates at the proxy; the app itself is unauthenticated and
+# only reachable on the internal Docker network.
+#
+# TLS is Caddy's internal CA (self-signed). Point your MCP client at
+# https://{$MCP_HOSTNAME}/mcp and trust the Caddy root cert (in the
+# caddy_data volume under /data/caddy/pki/.../root.crt) or accept once.
+{$MCP_HOSTNAME} {
+	tls internal
+
+	basicauth {
+		{$MCP_BASIC_USER} {$MCP_BASIC_HASH}
+	}
+
+	reverse_proxy app:8080
+}
