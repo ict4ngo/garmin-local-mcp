@@ -1,0 +1,12 @@
+{
+  "metricDescriptors": [
+    {"key": "directTimestamp", "metricsIndex": 0},
+    {"key": "directHeartRate", "metricsIndex": 1},
+    {"key": "directSpeed", "metricsIndex": 2}
+  ],
+  "activityDetailMetrics": [
+    {"metrics": [1768478400000, 145, 3.2]},
+    {"metrics": [1768478405000, 148, 3.4]}
+  ],
+  "unrecognizedGarminField": {"keep": true}
+}

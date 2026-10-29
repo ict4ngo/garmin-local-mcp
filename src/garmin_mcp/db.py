@@ -127,6 +127,30 @@ MIGRATIONS: dict[int, str] = {
     ALTER TABLE training_status ALTER COLUMN achievable_fitness_age TYPE DOUBLE PRECISION
       USING achievable_fitness_age::DOUBLE PRECISION;
     """,
+    4: """
+    CREATE TABLE samples (
+      source_endpoint TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      metric TEXT NOT NULL,
+      observed_at TIMESTAMPTZ NOT NULL,
+      source_date TEXT NOT NULL,
+      sample_index INTEGER NOT NULL CHECK (sample_index >= 0),
+      value DOUBLE PRECISION NOT NULL,
+      unit TEXT,
+      local_timestamp TEXT,
+      fetched_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (source_endpoint, source_id, metric, observed_at, sample_index)
+    );
+    CREATE INDEX ix_samples_observed_at ON samples(observed_at);
+    CREATE INDEX ix_samples_metric_observed_at ON samples(metric, observed_at);
+
+    CREATE TABLE activity_detail_state (
+      activity_id BIGINT PRIMARY KEY,
+      sha256 TEXT NOT NULL,
+      raw_path TEXT NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL
+    );
+    """,
 }
 
 SCHEMA_VERSION = max(MIGRATIONS)

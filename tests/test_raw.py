@@ -33,6 +33,47 @@ def test_iter_empty(tmp_path):
     assert list(raw.iter_daily_snapshots(tmp_path / "raw")) == []
 
 
+def test_snapshot_refresh_keeps_prior_version(tmp_path, postgres_connection):
+    conn = postgres_connection
+    raw_dir = tmp_path / "raw"
+    assert raw.write_snapshot(
+        conn, raw_dir, raw.daily_path(raw_dir, "2026-07-02", "stress"), {"value": 1},
+        "2026-07-02", "stress"
+    )
+    first = raw.write_versioned_snapshot(
+        conn, raw_dir, {"value": 2}, "2026-07-02", "stress", "2026-07-02T12:00:00.000001Z"
+    )
+    second = raw.write_versioned_snapshot(
+        conn, raw_dir, {"value": 3}, "2026-07-02", "stress", "2026-07-02T12:00:01.000001Z"
+    )
+
+    assert raw.read_snapshot(raw.daily_path(raw_dir, "2026-07-02", "stress")) == {"value": 1}
+    assert raw.read_snapshot(first) == {"value": 2}
+    assert raw.read_snapshot(second) == {"value": 3}
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint='stress'"
+    ).fetchone()["count"] == 3
+
+
+def test_latest_snapshot_orders_fractional_timestamps(tmp_path, postgres_connection):
+    conn = postgres_connection
+    raw_dir = tmp_path / "raw"
+    raw.write_snapshot(
+        conn, raw_dir, raw.daily_path(raw_dir, "2026-07-02", "stress"), {"value": 1},
+        "2026-07-02", "stress"
+    )
+    raw.write_versioned_snapshot(
+        conn, raw_dir, {"value": 2}, "2026-07-02", "stress", "2026-07-02T12:00:00Z"
+    )
+    raw.write_versioned_snapshot(
+        conn, raw_dir, {"value": 3}, "2026-07-02", "stress",
+        "2026-07-02T12:00:00.000001Z"
+    )
+
+    [(day, endpoint, path)] = raw.latest_daily_snapshots(raw_dir)
+    assert (day, endpoint, raw.read_snapshot(path)) == ("2026-07-02", "stress", {"value": 3})
+
+
 def test_iter_fit_archives_ignores_symlinks(tmp_path):
     raw_dir = tmp_path / "raw"
     archive = raw_dir / "fit" / "2026-06-24" / "bundle-1"

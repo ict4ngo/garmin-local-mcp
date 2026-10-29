@@ -49,6 +49,30 @@ class FakeClient:
     def get_activities_by_date(self, start, end):
         return self._payload("activities", start, [])
 
+    def get_stress_data(self, date):
+        return self._payload("stress_samples", date, {})
+
+    def get_body_battery(self, start, end):
+        return self._payload("body_battery_samples", start, [])
+
+    def get_heart_rates(self, date):
+        return self._payload("heart_rate_samples", date, {})
+
+    def get_spo2_data(self, date):
+        return self._payload("spo2_samples", date, {})
+
+    def get_respiration_data(self, date):
+        return self._payload("respiration_samples", date, {})
+
+    def get_daily_movement(self, date):
+        return self._payload("daily_movement_samples", date, {})
+
+    def get_training_readiness(self, date):
+        return self._payload("training_readiness_samples", date, [])
+
+    def get_activity_details(self, activity_id):
+        return load("activity_detail_samples")
+
 
 class GarminConnectTooManyRequestsError(Exception):
     """Same class *name* as garminconnect's - sync detects it without the import."""
@@ -97,6 +121,19 @@ def dump_db(conn):
         tuple(r.values())
         for r in conn.execute("SELECT path, date, endpoint, bytes, sha256 FROM raw_snapshots")
     )
+    out["samples"] = sorted(
+        tuple(r.values())
+        for r in conn.execute(
+            "SELECT source_endpoint, source_id, metric, observed_at, source_date, sample_index, "
+            "value, unit, local_timestamp FROM samples"
+        )
+    )
+    out["activity_detail_state"] = sorted(
+        tuple(r.values())
+        for r in conn.execute(
+            "SELECT activity_id, sha256, raw_path FROM activity_detail_state"
+        )
+    )
     return out
 
 
@@ -136,7 +173,7 @@ def test_sync_range_rows_land(config):
     assert state[("activities", DAY2)] == "empty"
 
     assert report["aborted"] is None and not report["resumable"]
-    assert report["requests"] == 12  # 6 endpoints x 2 days
+    assert report["requests"] == 26  # 13 date-scoped endpoints x 2 days
     assert report["endpoints"]["usersummary"] == {"ok": 1, "empty": 1, "skipped": 0, "error": 0}
 
 
@@ -235,7 +272,7 @@ def test_throttle_between_requests(config, monkeypatch):
     )
     conn = db.connect(delayed.database_url)
     run(delayed, conn, FakeClient())
-    assert sleeps == [1.5] * 11  # between requests only, not before the first
+    assert sleeps == [1.5] * 25  # between requests only, not before the first
 
 
 def test_reparse_rebuilds_identical_db(config):
@@ -246,10 +283,12 @@ def test_reparse_rebuilds_identical_db(config):
 
     conn = db.connect(config.database_url)
     with conn.transaction():
-        for table in (*DATA_TABLES, "sync_state", "raw_snapshots"):
+        for table in (
+            *DATA_TABLES, "sync_state", "raw_snapshots", "samples", "activity_detail_state"
+        ):
             conn.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed test table names
     report = sync.reparse(config, conn, progress=quiet)
-    assert report["daily_snapshots"] == 12
+    assert report["daily_snapshots"] == 26
     assert report["activity_snapshots"] == 1
     assert dump_db(conn) == expected
 
@@ -264,4 +303,97 @@ def test_yesterday_and_default_range(config):
 def test_unknown_endpoint_rejected(config):
     conn = db.connect(config.database_url)
     with pytest.raises(ValueError, match="Unknown endpoints"):
-        run(config, conn, FakeClient(), endpoints=["body_battery"])
+        run(config, conn, FakeClient(), endpoints=["not_an_endpoint"])
+
+
+def test_current_day_sample_refresh_is_idempotent(config, monkeypatch):
+    monkeypatch.setattr(sync, "_today", lambda _config: DAY1, raising=False)
+
+    class SampleClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.sample_calls = []
+
+        def get_stress_data(self, date):
+            self.sample_calls.append(("stress", date))
+            payload = load("stress_samples")
+            if len(self.sample_calls) > 2:
+                payload["stressValuesArray"] = payload["stressValuesArray"][:1]
+            return payload
+
+        def get_body_battery(self, start, end):
+            self.sample_calls.append(("body_battery", start, end))
+            return load("body_battery_samples")
+
+    client = SampleClient()
+    conn = db.connect(config.database_url)
+    for _ in range(2):
+        sync.sync_range(
+            config, conn, client, DAY1, DAY1, endpoints=["stress", "body_battery", "sleep"],
+            progress=quiet
+        )
+
+    assert client.sample_calls == [
+        ("stress", DAY1), ("body_battery", DAY1, DAY1),
+        ("stress", DAY1), ("body_battery", DAY1, DAY1),
+    ]
+    assert sum(call[0] == "sleep" for call in client.calls) == 2
+    assert conn.execute("SELECT COUNT(*) AS count FROM samples").fetchone()["count"] == 15
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM samples WHERE source_endpoint='stress'"
+    ).fetchone()["count"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint IN ('stress','body_battery')"
+    ).fetchone()["count"] == 4
+
+
+def test_reparse_uses_latest_snapshot_version(config):
+    conn = db.connect(config.database_url)
+    first = load("stress_samples")
+    latest = {**first, "stressValuesArray": [[1768478400000, 51]]}
+    raw.write_snapshot(
+        conn, config.raw_dir, raw.daily_path(config.raw_dir, DAY1, "stress"), first, DAY1,
+        "stress"
+    )
+    raw.write_versioned_snapshot(
+        conn, config.raw_dir, latest, DAY1, "stress", "2026-01-16T00:00:00.000001Z"
+    )
+
+    sync.reparse(config, conn, progress=quiet)
+
+    samples = conn.execute(
+        "SELECT value FROM samples WHERE source_endpoint='stress' ORDER BY sample_index"
+    ).fetchall()
+    assert [row["value"] for row in samples] == [51.0]
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint='stress'"
+    ).fetchone()["count"] == 2
+
+
+def test_activity_detail_fetch_is_not_repeated(config):
+    class DetailClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.detail_calls = []
+
+        def get_activity_details(self, activity_id):
+            self.detail_calls.append(activity_id)
+            return load("activity_detail_samples")
+
+    client = DetailClient()
+    conn = db.connect(config.database_url)
+    for _ in range(2):
+        sync.sync_range(
+            config, conn, client, DAY1, DAY1, endpoints=["activities"], force=True,
+            progress=quiet
+        )
+
+    assert client.detail_calls == [90000000001]
+    state = conn.execute("SELECT * FROM activity_detail_state").fetchall()
+    assert len(state) == 1 and state[0]["activity_id"] == 90000000001
+    assert conn.execute("SELECT COUNT(*) AS count FROM samples").fetchone()["count"] == 4
+    assert len(list(raw.iter_activity_snapshots(config.raw_dir))) == 2
+    assert len(list(raw.iter_activity_detail_snapshots(config.raw_dir))) == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint='activities'"
+    ).fetchone()["count"] == 4

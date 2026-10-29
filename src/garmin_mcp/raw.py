@@ -2,10 +2,13 @@
 
 Layout:
     <data_dir>/raw/daily/YYYY/YYYY-MM-DD/<endpoint>.json
+    <data_dir>/raw/daily/YYYY/YYYY-MM-DD/<endpoint>/<timestamp>-<sha>.json
     <data_dir>/raw/activities/<activity_id>.json
+    <data_dir>/raw/activities/<activity_id>/<timestamp>-<sha>.json
+    <data_dir>/raw/activities/<activity_id>/details/<timestamp>-<sha>.json
 
-Snapshots are the source of truth and are never overwritten (existing files are
-skipped), so history survives API breakage and parser bugs alike.
+Snapshots are the source of truth and are never overwritten, so history survives
+API breakage and parser bugs alike. The original flat paths remain readable.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from datetime import date as date_type
 from pathlib import Path
 
@@ -34,6 +38,29 @@ def daily_path(raw_dir: Path, date: str, endpoint: str) -> Path:
 
 def activity_path(raw_dir: Path, activity_id: int) -> Path:
     return raw_dir / "activities" / f"{activity_id}.json"
+
+
+def _version_stamp(fetched_at: str) -> str:
+    parsed = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("fetched_at must be timezone-aware")
+    return parsed.astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def versioned_daily_path(
+    raw_dir: Path, date: str, endpoint: str, fetched_at: str, digest: str
+) -> Path:
+    stamp = _version_stamp(fetched_at)
+    return raw_dir / "daily" / date[:4] / date / endpoint / f"{stamp}-{digest[:16]}.json"
+
+
+def versioned_activity_path(
+    raw_dir: Path, activity_id: int, fetched_at: str, digest: str, *, details: bool = False
+) -> Path:
+    base = raw_dir / "activities" / str(activity_id)
+    if details:
+        base = base / "details"
+    return base / f"{_version_stamp(fetched_at)}-{digest[:16]}.json"
 
 
 def write_snapshot(
@@ -54,12 +81,39 @@ def write_snapshot(
     return True
 
 
+def write_versioned_snapshot(
+    conn: Connection,
+    raw_dir: Path,
+    payload: object,
+    date: str | None,
+    endpoint: str,
+    fetched_at: str,
+    *,
+    activity_id: int | None = None,
+    details: bool = False,
+) -> Path:
+    """Write and index a new immutable API snapshot version."""
+    data = json.dumps(payload, indent=1, sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(data).hexdigest()
+    path = (
+        versioned_activity_path(raw_dir, activity_id, fetched_at, digest, details=details)
+        if activity_id is not None
+        else versioned_daily_path(raw_dir, str(date), endpoint, fetched_at, digest)
+    )
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    index_snapshot(conn, raw_dir, path, date, endpoint, fetched_at=fetched_at)
+    return path
+
+
 def index_snapshot(
     conn: Connection,
     raw_dir: Path,
     path: Path,
     date: str | None,
     endpoint: str,
+    fetched_at: str | None = None,
 ) -> None:
     """(Re-)register an existing snapshot file in raw_snapshots (used by reparse)."""
     data = path.read_bytes()
@@ -70,7 +124,7 @@ def index_snapshot(
             "path": str(path.relative_to(raw_dir)).replace("\\", "/"),
             "date": date,
             "endpoint": endpoint,
-            "fetched_at": utcnow(),
+            "fetched_at": fetched_at or utcnow(),
             "bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
         },
@@ -102,9 +156,18 @@ def iter_daily_snapshots(raw_dir: Path) -> Iterator[tuple[str, str, Path]]:
             ):
                 continue
             for path in sorted(day_dir.iterdir()):
-                if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                if path.is_symlink():
                     continue
-                yield day_dir.name, path.stem, path
+                if path.is_file() and path.suffix == ".json":
+                    yield day_dir.name, path.stem, path
+                elif path.is_dir():
+                    for version in sorted(path.iterdir()):
+                        if (
+                            not version.is_symlink()
+                            and version.is_file()
+                            and version.suffix == ".json"
+                        ):
+                            yield day_dir.name, path.name, version
 
 
 def iter_activity_snapshots(raw_dir: Path) -> Iterator[Path]:
@@ -115,8 +178,73 @@ def iter_activity_snapshots(raw_dir: Path) -> Iterator[Path]:
     if directory.is_symlink() or not directory.is_dir():
         return
     for path in sorted(directory.iterdir()):
-        if not path.is_symlink() and path.is_file() and path.suffix == ".json":
+        if path.is_symlink():
+            continue
+        if path.is_file() and path.suffix == ".json":
             yield path
+        elif path.is_dir():
+            for snapshot in sorted(path.iterdir()):
+                if snapshot.is_symlink():
+                    continue
+                if snapshot.is_file() and snapshot.suffix == ".json":
+                    yield snapshot
+                elif not snapshot.is_dir() or snapshot.name == "details":
+                    continue
+
+
+def iter_activity_detail_snapshots(raw_dir: Path) -> Iterator[tuple[int, Path]]:
+    """Yield versioned activity-detail snapshots without following symlinks."""
+    if Path(raw_dir).is_symlink():
+        return
+    directory = raw_dir / "activities"
+    if directory.is_symlink() or not directory.is_dir():
+        return
+    for activity_dir in sorted(directory.iterdir()):
+        if (
+            activity_dir.is_symlink()
+            or not activity_dir.is_dir()
+            or not activity_dir.name.isdigit()
+        ):
+            continue
+        details = activity_dir / "details"
+        if details.is_symlink() or not details.is_dir():
+            continue
+        for path in sorted(details.iterdir()):
+            if not path.is_symlink() and path.is_file() and path.suffix == ".json":
+                yield int(activity_dir.name), path
+
+
+def latest_daily_snapshots(raw_dir: Path) -> Iterator[tuple[str, str, Path]]:
+    """Yield the newest file version per (date, endpoint), legacy path included."""
+    latest: dict[tuple[str, str], Path] = {}
+    for day, endpoint, path in iter_daily_snapshots(raw_dir):
+        key = (day, endpoint)
+        if key not in latest or _snapshot_version(path) > _snapshot_version(latest[key]):
+            latest[key] = path
+    for (day, endpoint), path in sorted(latest.items()):
+        yield day, endpoint, path
+
+
+def latest_activity_snapshots(raw_dir: Path) -> Iterator[Path]:
+    """Yield the newest version of each individual activity summary."""
+    latest: dict[int, Path] = {}
+    for path in iter_activity_snapshots(raw_dir):
+        try:
+            activity_id = int(
+                path.stem if path.parent == raw_dir / "activities" else path.parent.name
+            )
+        except ValueError:
+            continue
+        if activity_id not in latest or _snapshot_version(path) > _snapshot_version(
+            latest[activity_id]
+        ):
+            latest[activity_id] = path
+    yield from (latest[key] for key in sorted(latest))
+
+
+def _snapshot_version(path: Path) -> str:
+    match = re.match(r"^(\d{8}T\d{12}Z)-", path.name)
+    return match.group(1) if match else ""
 
 
 def _safe_directory(path: Path) -> None:
