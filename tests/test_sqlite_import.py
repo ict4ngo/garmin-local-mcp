@@ -1,9 +1,10 @@
 import sqlite3
+from types import SimpleNamespace
 
 import psycopg
 import pytest
 
-from garmin_mcp import db, sqlite_import
+from garmin_mcp import cli, db, sqlite_import
 
 
 @pytest.fixture
@@ -115,3 +116,20 @@ def test_sqlite_migration_failure_keeps_source_unchanged(
         conn.close()
     assert _source_bytes(source) == before
     connection.close()
+
+
+def test_migrate_sqlite_cli_redacts_exception_details(monkeypatch, capsys):
+    secret = "postgresql://garmin:recognizable-password@db.example/warehouse"
+
+    def fail_migration(source, database_url):
+        raise RuntimeError(f"connection failed for {secret}")
+
+    monkeypatch.setattr(sqlite_import, "migrate_sqlite", fail_migration)
+    args = SimpleNamespace(source="legacy.sqlite", config=SimpleNamespace(database_url=secret))
+
+    assert cli.cmd_migrate_sqlite(args) == 1
+    stderr = capsys.readouterr().err
+    assert "SQLite migration failed" in stderr
+    assert "Verify the source file and PostgreSQL connection settings" in stderr
+    assert secret not in stderr
+    assert "recognizable-password" not in stderr

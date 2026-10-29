@@ -150,8 +150,12 @@ def cmd_migrate_sqlite(args: argparse.Namespace) -> int:
 
     try:
         report = migrate_sqlite(args.source, args.config.database_url)
-    except Exception as e:
-        print(f"SQLite migration failed: {e}", file=sys.stderr)
+    except Exception:
+        print(
+            "SQLite migration failed. Verify the source file and PostgreSQL connection settings; "
+            "error details are omitted to protect credentials.",
+            file=sys.stderr,
+        )
         return 1
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

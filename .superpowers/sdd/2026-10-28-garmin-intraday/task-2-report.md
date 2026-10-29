@@ -30,3 +30,23 @@ FIT bundles are archived before decoding at `raw/fit/<date>/<bundle-id>/`, with 
 ## Commit
 
 `feat: migrate legacy SQLite data safely`
+
+## Fix round 1 — redact SQLite migration errors
+
+### Change
+
+The migration CLI no longer prints exception text. On failure it emits a fixed actionable message asking the user to verify the source file and PostgreSQL connection settings, and states that details are omitted to protect credentials. Added a CLI test that injects a `RuntimeError` containing a recognizable PostgreSQL URL/password and asserts the generic failure is useful while the URL and password are absent. SQLite source handling and the PostgreSQL transaction code were unchanged.
+
+### TDD evidence
+
+- **RED:** `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/pytest tests/test_sqlite_import.py::test_migrate_sqlite_cli_redacts_exception_details -q` — **1 failed**. The existing CLI output included `connection failed for postgresql://garmin:recognizable-password@db.example/warehouse`; the actionable-message assertion failed, demonstrating the exception leak.
+- **GREEN focused:** `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/pytest tests/test_sqlite_import.py tests/test_importer.py tests/test_raw.py -q` — **12 passed**.
+- **GREEN full:** `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/pytest -q` — **135 passed, 1 skipped**.
+- `./.venv/bin/ruff check .` — passed.
+- `./.venv/bin/uv lock --check` — passed.
+- `git diff --check` — passed.
+- Pytest emitted the existing AnyIO `PytestRemovedIn10Warning`; no test failures resulted.
+
+### Commit
+
+`fix: redact SQLite migration errors`
