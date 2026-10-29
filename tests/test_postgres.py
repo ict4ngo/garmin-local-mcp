@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import _validated_test_database_url
 from garmin_mcp import db
 
 
@@ -113,8 +114,19 @@ def test_test_database_url_rejects_application_database(monkeypatch, request):
     database_url = "postgresql://garmin:garmin@localhost:55432/garmin_test"
     monkeypatch.setenv("GARMIN_MCP_TEST_DATABASE_URL", database_url)
     monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", database_url)
-    with pytest.raises(pytest.fail.Exception, match="must differ from GARMIN_MCP_DATABASE_URL"):
+    with pytest.raises(pytest.fail.Exception, match="GARMIN_MCP_DATABASE_URL must be unset"):
         request.getfixturevalue("test_database_url")
+
+
+def test_test_database_url_rejects_preexisting_application_url_across_aliases():
+    environment = {
+        "GARMIN_MCP_TEST_DATABASE_URL": (
+            "postgresql://garmin:garmin@localhost:55432/garmin_test"
+        ),
+        "GARMIN_MCP_DATABASE_URL": "postgresql://garmin:garmin@postgres:5432/garmin_test",
+    }
+    with pytest.raises(ValueError, match="GARMIN_MCP_DATABASE_URL must be unset"):
+        _validated_test_database_url(environment)
 
 
 def test_runtime_dependency_floors():
