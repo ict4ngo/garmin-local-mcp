@@ -146,6 +146,16 @@ def sync_status() -> dict:
         n_errors = conn.execute(
             "SELECT COUNT(*) AS count FROM sync_state WHERE status='error'"
         ).fetchone()["count"]
+        backfill_rows = conn.execute(
+            """SELECT endpoint, cursor_date, last_date, empty_streak, status, last_error, updated_at
+               FROM backfill_state ORDER BY endpoint"""
+        ).fetchall()
+        samples_coverage = conn.execute(
+            """SELECT source_endpoint, MIN(source_date) AS first, MAX(source_date) AS last,
+                      COUNT(*) AS count FROM samples GROUP BY source_endpoint
+               ORDER BY source_endpoint"""
+        ).fetchall()
+        last_scheduled_run = db.get_worker_state(conn, "last_scheduled_run")
         # Surfaced so an assistant never reports generated numbers as real
         # measurements. Absent for normal stores.
         generated = demo.is_demo(conn)
@@ -159,6 +169,22 @@ def sync_status() -> dict:
             else {}
         ),
         "coverage": coverage,
+        "schedule": {"times": list(cfg.sync_times), "timezone": cfg.timezone},
+        "last_scheduled_run": last_scheduled_run,
+        "backfill": {
+            "enabled": cfg.backfill_enabled,
+            "lower_bound": cfg.backfill_start_date,
+            "empty_streak_days": cfg.backfill_empty_streak_days,
+            "endpoints": [dict(row) for row in backfill_rows],
+        },
+        "samples_coverage": {
+            row["source_endpoint"]: {
+                "rows": row["count"],
+                "first": row["first"],
+                "last": row["last"],
+            }
+            for row in samples_coverage
+        },
         "last_sync": last_sync,
         "pending_errors": n_errors,
         "recent_errors": [

@@ -28,6 +28,8 @@ EXPECTED_TOOLS = {
 def data_dir(tmp_path, monkeypatch, postgres_connection, test_database_url):
     monkeypatch.setenv("GARMIN_MCP_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", test_database_url)
+    monkeypatch.setenv("GARMIN_MCP_SYNC_TIMES", "09:00")
+    monkeypatch.setenv("GARMIN_MCP_TIMEZONE", "America/New_York")
     monkeypatch.setattr(server, "_config", None)  # drop any cached config
     return tmp_path
 
@@ -131,6 +133,9 @@ def test_sync_status_reports_coverage(data_dir):
     assert res["coverage"]["activities"]["rows"] == 0
     assert res["pending_errors"] == 0 and res["recent_errors"] == []
     assert res["last_sync"] is not None
+    assert "backfill" in res and "last_scheduled_run" in res
+    assert "samples_coverage" in res
+    assert "database_url" not in res and "tokens_dir" not in res
 
 
 def test_import_fit_bad_folder_is_a_structured_error(data_dir, tmp_path):

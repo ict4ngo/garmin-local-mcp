@@ -33,7 +33,7 @@ from .samples import replace_samples
 
 # Backoff waits between retries after a rate-limit error; a rate limit hit
 # after the last wait aborts the run (cleanly - sync_state makes it resumable).
-BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 600)
+BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 
 _sleep = time.sleep  # module-level so tests can stub it out
 
@@ -45,15 +45,13 @@ class RateLimitAbort(Exception):
 
 
 def yesterday(config: Config) -> str:
-    """Yesterday's date in the configured timezone (fallback: system timezone)."""
-    tz = ZoneInfo(config.timezone) if config.timezone else None
-    now = datetime.now(tz) if tz else datetime.now().astimezone()
+    """Yesterday's date in the explicitly configured IANA timezone."""
+    now = datetime.now(ZoneInfo(config.timezone))
     return (now.date() - timedelta(days=1)).isoformat()
 
 
 def _today(config: Config) -> str:
-    tz = ZoneInfo(config.timezone) if config.timezone else None
-    now = datetime.now(tz) if tz else datetime.now().astimezone()
+    now = datetime.now(ZoneInfo(config.timezone))
     return now.date().isoformat()
 
 
@@ -86,10 +84,18 @@ def _is_auth(exc: BaseException) -> bool:
     return "GarminConnectAuthenticationError" in _exception_names(exc)
 
 
-def _fetch_with_backoff(endpoint: Endpoint, client, day: str, progress: Progress):
+def _fetch_with_backoff(
+    endpoint: Endpoint,
+    client,
+    day: str,
+    progress: Progress,
+    before_request: Callable[[], None] | None = None,
+):
     """Fetch one payload, backing off on rate limits; AuthError on auth failure."""
     for wait in (*BACKOFF_SECONDS, None):
         try:
+            if before_request is not None:
+                before_request()
             return endpoint.fetch(client, day)
         except AuthError:
             raise
@@ -166,6 +172,7 @@ def _store(
             ).fetchone()
             if known:
                 continue
+            db.throttle_garmin_request(conn, config.request_delay_seconds, _sleep)
             details = client.get_activity_details(activity_id)
             activity_day = activity_date(item, day) or day
             detail_path = raw.write_versioned_snapshot(
@@ -196,7 +203,7 @@ def _store(
     return row_count
 
 
-def sync_range(
+def _sync_range(
     config: Config,
     conn: Connection,
     client,
@@ -204,6 +211,7 @@ def sync_range(
     end: str,
     endpoints: list[str] | None = None,
     force: bool = False,
+    force_endpoints: set[str] | None = None,
     progress: Progress = print,
 ) -> dict:
     """Sync [start, end] (inclusive, oldest first). Returns a report dict.
@@ -226,7 +234,6 @@ def sync_range(
         "resumable": False,
         "endpoints": {n: {"ok": 0, "empty": 0, "skipped": 0, "error": 0} for n in names},
     }
-    made_request = False
     for day in _dates(start, end):
         for name in names:
             endpoint = known_endpoints[name]
@@ -234,14 +241,20 @@ def sync_range(
             refresh_today = day == _today(config) and (
                 name in SAMPLE_ENDPOINTS or name == "sleep"
             )
-            if not force and not refresh_today and db.synced_ok(conn, name, day):
+            forced = force or name in (force_endpoints or set())
+            if not forced and not refresh_today and db.synced_ok(conn, name, day):
                 stats["skipped"] += 1
                 continue
-            if made_request and config.request_delay_seconds > 0:
-                _sleep(config.request_delay_seconds)
-            made_request = True
             try:
-                payload = _fetch_with_backoff(endpoint, client, day, progress)
+                payload = _fetch_with_backoff(
+                    endpoint,
+                    client,
+                    day,
+                    progress,
+                    before_request=lambda: db.throttle_garmin_request(
+                        conn, config.request_delay_seconds, _sleep
+                    ),
+                )
                 report["requests"] += 1
             except RateLimitAbort as e:
                 db.mark_sync(conn, name, day, "error", f"rate limited: {e}")
@@ -276,6 +289,32 @@ def sync_range(
             report["rows"] += n_rows
             progress(f"{day} {name}: {status}" + (f" ({n_rows} rows)" if n_rows else ""))
     return report
+
+
+def sync_range(
+    config: Config,
+    conn: Connection,
+    client,
+    start: str,
+    end: str,
+    endpoints: list[str] | None = None,
+    force: bool = False,
+    force_endpoints: set[str] | None = None,
+    progress: Progress = print,
+) -> dict:
+    """Serialize the complete request sequence with every other sync caller."""
+    with db.sync_advisory_lock(conn):
+        return _sync_range(
+            config,
+            conn,
+            client,
+            start,
+            end,
+            endpoints=endpoints,
+            force=force,
+            force_endpoints=force_endpoints,
+            progress=progress,
+        )
 
 
 def reparse(config: Config, conn: Connection, progress: Progress = print) -> dict:

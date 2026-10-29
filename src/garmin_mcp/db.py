@@ -6,6 +6,8 @@ truth, and `reparse` can rebuild every table here from them offline.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import psycopg
@@ -151,13 +153,34 @@ MIGRATIONS: dict[int, str] = {
       fetched_at TIMESTAMPTZ NOT NULL
     );
     """,
+    5: """
+    CREATE TABLE backfill_state (
+      endpoint TEXT PRIMARY KEY,
+      cursor_date TEXT,
+      last_date TEXT,
+      empty_streak INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK(status IN ('pending','running','complete','error')),
+      last_error TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE worker_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    """,
 }
 
 SCHEMA_VERSION = max(MIGRATIONS)
+SYNC_ADVISORY_LOCK_KEY = 0x4741524D53594E43
 
 
 def utcnow() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utcnow_precise() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def connect(database_url: str) -> psycopg.Connection:
@@ -242,3 +265,44 @@ def synced_ok(conn: psycopg.Connection, endpoint: str, date: str) -> bool:
         "SELECT status FROM sync_state WHERE endpoint=%s AND date=%s", (endpoint, date)
     ).fetchone()
     return row is not None and row["status"] in ("ok", "empty")
+
+
+@contextmanager
+def sync_advisory_lock(conn: psycopg.Connection) -> Iterator[None]:
+    """Serialize every manual, scheduled, and backfill Garmin sync on this DB."""
+    conn.execute("SELECT pg_advisory_lock(%s)", (SYNC_ADVISORY_LOCK_KEY,))
+    try:
+        yield
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (SYNC_ADVISORY_LOCK_KEY,))
+
+
+def set_worker_state(conn: psycopg.Connection, key: str, value: str) -> None:
+    with conn.transaction():
+        conn.execute(
+            """INSERT INTO worker_state (key, value, updated_at) VALUES (%s, %s, %s)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+               updated_at=excluded.updated_at""",
+            (key, value, utcnow()),
+        )
+
+
+def get_worker_state(conn: psycopg.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM worker_state WHERE key=%s", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def throttle_garmin_request(
+    conn: psycopg.Connection, delay_seconds: float, sleep: Callable[[float], None]
+) -> None:
+    """Enforce the configured spacing across separate sync calls and processes."""
+    now = datetime.now(UTC)
+    previous = get_worker_state(conn, "last_garmin_request_at")
+    if previous is not None:
+        previous_at = datetime.fromisoformat(previous)
+        elapsed = (now - previous_at).total_seconds()
+        remaining = delay_seconds - elapsed
+        if remaining > 0:
+            sleep(remaining)
+            now = datetime.now(UTC)
+    set_worker_state(conn, "last_garmin_request_at", now.isoformat())

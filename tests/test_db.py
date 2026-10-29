@@ -20,6 +20,8 @@ def test_schema_created(postgres_connection):
         "training_status",
         "raw_snapshots",
         "sync_state",
+        "backfill_state",
+        "worker_state",
     } <= tables
     version = postgres_connection.execute(
         "SELECT MAX(version) AS version FROM schema_version"
@@ -42,7 +44,7 @@ def test_migration_v2_adds_fitness_age_columns(postgres_connection):
         )
     }
     assert {"fitness_age", "achievable_fitness_age"} <= cols
-    assert db.SCHEMA_VERSION == 4
+    assert db.SCHEMA_VERSION == 5
     db.upsert(
         postgres_connection,
         "training_status",

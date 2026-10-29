@@ -34,11 +34,14 @@ def test_database_url() -> str:
 @pytest.fixture
 def postgres_connection(test_database_url, monkeypatch):
     monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", test_database_url)
+    monkeypatch.setenv("GARMIN_MCP_SYNC_TIMES", "09:00")
+    monkeypatch.setenv("GARMIN_MCP_TIMEZONE", "UTC")
     from garmin_mcp import db
 
     conn = db.connect(test_database_url)
     conn.execute(
-        "TRUNCATE TABLE demo_info, activity_detail_state, samples, raw_snapshots, sync_state, "
+        "TRUNCATE TABLE demo_info, worker_state, backfill_state, activity_detail_state, samples, "
+        "raw_snapshots, sync_state, "
         "activities, training_status, "
         "hrv, sleep, daily_wellness RESTART IDENTITY CASCADE"
     )

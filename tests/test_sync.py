@@ -89,9 +89,13 @@ def config(tmp_path, postgres_connection, test_database_url):
         data_dir=tmp_path,
         database_url=test_database_url,
         timezone="America/New_York",
+        sync_times=("09:00",),
         units="metric",
         request_delay_seconds=0.0,
         baseline_window_days=28,
+        backfill_start_date=None,
+        backfill_enabled=True,
+        backfill_empty_streak_days=90,
     )
     cfg.ensure_dirs()
     return cfg
@@ -205,7 +209,7 @@ def test_rate_limit_backs_off_then_aborts(config, monkeypatch):
     conn = db.connect(config.database_url)
     report = run(config, conn, RateLimitedClient())
 
-    assert sleeps == [30, 120, 600]
+    assert sleeps == [30, 60, 120]
     assert report["aborted"] == "rate_limited"
     assert report["resumable"] is True
     assert report["requests"] == 0
@@ -266,13 +270,45 @@ def test_throttle_between_requests(config, monkeypatch):
         data_dir=config.data_dir,
         database_url=config.database_url,
         timezone=config.timezone,
+        sync_times=config.sync_times,
         units=config.units,
         request_delay_seconds=1.5,
         baseline_window_days=28,
+        backfill_start_date=config.backfill_start_date,
+        backfill_enabled=config.backfill_enabled,
+        backfill_empty_streak_days=config.backfill_empty_streak_days,
     )
     conn = db.connect(delayed.database_url)
     run(delayed, conn, FakeClient())
-    assert sleeps == [1.5] * 25  # between requests only, not before the first
+    assert len(sleeps) == 26  # includes the nested activity-detail request
+    assert all(1.47 <= delay <= 1.5 for delay in sleeps)
+
+
+def test_throttle_continues_across_sync_calls(config, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(sync, "_sleep", sleeps.append)
+    delayed = Config(
+        data_dir=config.data_dir,
+        database_url=config.database_url,
+        timezone=config.timezone,
+        sync_times=config.sync_times,
+        units=config.units,
+        request_delay_seconds=1.5,
+        baseline_window_days=config.baseline_window_days,
+        backfill_start_date=config.backfill_start_date,
+        backfill_enabled=config.backfill_enabled,
+        backfill_empty_streak_days=config.backfill_empty_streak_days,
+    )
+    conn = db.connect(delayed.database_url)
+
+    for day in (DAY1, DAY2):
+        sync.sync_range(
+            delayed, conn, FakeClient(), day, day, endpoints=["usersummary"],
+            progress=quiet,
+        )
+
+    assert len(sleeps) == 1
+    assert 1.47 <= sleeps[0] <= 1.5
 
 
 def test_reparse_rebuilds_identical_db(config):

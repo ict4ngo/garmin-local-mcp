@@ -20,6 +20,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return serve(args.config)
 
 
+def cmd_worker(args: argparse.Namespace) -> int:
+    from .worker import run_worker
+
+    return run_worker(args.config)
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     from .login import run_login
 
@@ -106,18 +112,27 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  {table:16} {coverage['count']:6} rows  {span}")
     if not has_data:
         print("No database rows yet - run: garmin-local-mcp sync")
-        conn.close()
-        return 0
-    errors = conn.execute(
-        "SELECT endpoint, date, last_error FROM sync_state "
-        "WHERE status='error' ORDER BY date, endpoint"
-    ).fetchall()
-    if errors:
-        print(f"pending sync errors ({len(errors)}):")
-        for row in errors:
-            print(f"  {row['date']} {row['endpoint']}: {row['last_error']}")
     else:
-        print("pending sync errors: none")
+        errors = conn.execute(
+            "SELECT endpoint, date, last_error FROM sync_state "
+            "WHERE status='error' ORDER BY date, endpoint"
+        ).fetchall()
+        if errors:
+            print(f"pending sync errors ({len(errors)}):")
+            for row in errors:
+                print(f"  {row['date']} {row['endpoint']}: {row['last_error']}")
+        else:
+            print("pending sync errors: none")
+    last_scheduled = db.get_worker_state(conn, "last_scheduled_run")
+    print(f"schedule: {', '.join(config.sync_times)} ({config.timezone})")
+    print(f"last scheduled run: {last_scheduled or 'none'}")
+    backfill = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM backfill_state GROUP BY status ORDER BY status"
+    ).fetchall()
+    backfill_summary = ", ".join(
+        f"{row['status']}={row['count']}" for row in backfill
+    ) or "not started"
+    print(f"backfill: {backfill_summary}")
     conn.close()
     return 0
 
@@ -248,6 +263,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="Run the stdio MCP server (never prompts)")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("worker", help="Run the scheduled sync and history backfill worker")
+    p.set_defaults(func=cmd_worker)
 
     p = sub.add_parser("login", help="Interactive Garmin Connect login (supports MFA)")
     p.add_argument("--status", action="store_true", help="Show token status and exit")
