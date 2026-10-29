@@ -1,7 +1,7 @@
 # Garmin intraday data and homelab MCP service
 
-**Status:** Approved by the user on 2026-10-28; implementation is not authorized
-until the implementation plan is reviewed and an execution approach is chosen.
+**Status:** Approved by the user on 2026-10-28. Final review added safety
+clarifications for migration and LAN binding; implementation is in progress.
 
 ## Intent
 
@@ -118,7 +118,11 @@ it can be throttled and allowed to take hours or days.
 - Replace SQLite as the ongoing runtime database rather than maintaining two
   writable backends. Provide a one-time, non-destructive SQLite-to-PostgreSQL
   migration for existing installations: leave the source SQLite file intact
-  until the PostgreSQL copy is validated, and report row counts/coverage.
+  until the PostgreSQL copy is validated, and report row counts/coverage. Require
+  all old SQLite writers to be stopped before migration and require an explicit
+  operator confirmation. Import only into an empty PostgreSQL warehouse; repeat
+  migration of the same source is a no-op, and do not overwrite newer PostgreSQL
+  rows. Legacy databases may not contain the optional demo marker table.
 - Configure database credentials separately from the MCP bearer token. Keep
   credentials out of the image and logs; Compose secrets or required runtime
   environment variables may be used. PostgreSQL should accept connections only
@@ -151,9 +155,12 @@ it can be throttled and allowed to take hours or days.
   PostgreSQL and app-data volumes, configurable port/schedule/timezone/token,
   and clear login/bootstrap steps. Schedule values must be visible and
   overridable in the Compose environment (for example via `.env`).
-  The service should be reachable on the homelab network, not exposed publicly
-  by default. Recommend HTTPS termination at a trusted reverse proxy if the
-  traffic crosses an untrusted network.
+  Bind the published MCP port to a configurable host IP; default to loopback
+  for safety and document setting it to the homelab's private LAN IP for remote
+  clients. The published host port must also be configurable. Keep PostgreSQL
+  private. The service should not be exposed publicly by default. Recommend
+  HTTPS termination at a trusted reverse proxy if the traffic crosses an
+  untrusted network.
 - The recurring sync must not depend on an MCP client being connected. Coordinate
   scheduler writes and MCP reads safely with PostgreSQL and expose useful sync
   status/errors.

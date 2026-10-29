@@ -16,12 +16,12 @@
 - Keep the MCP SDK on v1; use `mcp>=1.30,<2` for the tested Streamable HTTP app API.
 - Raise `garminconnect` to `>=0.3.19,<0.4` by Task 3; upstream added `get_daily_movement()` in 0.3.19.
 - Use plain PostgreSQL; do not add TimescaleDB unless measurements later justify it.
-- Keep PostgreSQL private to Compose; expose only the bearer-protected MCP HTTP endpoint to the LAN.
+- Keep PostgreSQL private to Compose; expose only the bearer-protected MCP HTTP endpoint. Bind its host port to a configurable IP, defaulting to loopback; users set the homelab's private LAN IP in `.env` for remote clients.
 - Keep PostgreSQL data and the raw Garmin/token app data in separate persistent volumes.
 - Supply schedule and IANA timezone through Docker Compose/environment; the worker code must not contain a fallback schedule. Compose defaults to `06:00,18:00` and both values are editable through `.env` without rebuilding the image.
 - Automatic historical backfill is resumable, at most one Garmin request is in flight, waits 2 seconds between requests by default, and backs off exponentially after rate limits.
 - Never invent/interpolate finer-grained samples; preserve raw source payloads and timestamp/time-zone meaning.
-- Preserve existing daily MCP tools and SQLite data through a non-destructive one-time migration.
+- Preserve existing daily MCP tools and SQLite data through a non-destructive one-time migration. Stop old SQLite writers and explicitly confirm this before migration; require an empty PostgreSQL target, make same-source retry a no-op, and never overwrite newer PostgreSQL rows.
 - Never bake secrets into the image, use weak token/password defaults, or log Garmin/database/MCP credentials.
 - PostgreSQL-backed tests require a dedicated `GARMIN_MCP_TEST_DATABASE_URL`; never point tests or migration fixtures at a real Garmin warehouse.
 
@@ -79,17 +79,18 @@
 
 **Files:**
 - Create: `src/garmin_mcp/sqlite_import.py`
-- Modify: `src/garmin_mcp/cli.py`, `src/garmin_mcp/importer.py`, `src/garmin_mcp/raw.py`
+- Modify: `src/garmin_mcp/cli.py`, `src/garmin_mcp/importer.py`, `src/garmin_mcp/raw.py`, `src/garmin_mcp/db.py`
 - Test: `tests/test_sqlite_import.py`, `tests/test_importer.py`, `tests/test_raw.py`
 
 **Interfaces:**
-- Produces `sqlite_import.migrate_sqlite(source: Path, database_url: str) -> dict` with source/destination row counts and coverage.
-- Produces CLI command `garmin-local-mcp migrate-sqlite --from PATH`; it never deletes or modifies the source SQLite file.
+- Produces `sqlite_import.migrate_sqlite(source: Path, database_url: str, *, source_stopped: bool = False) -> dict` with source/destination row counts and coverage. It rejects `source_stopped=False`, imports only into an empty PostgreSQL warehouse, and uses a source fingerprint/migration record so an identical retry is a no-op rather than a conflict overwrite.
+- Produces CLI command `garmin-local-mcp migrate-sqlite --from PATH --source-stopped`; it never deletes or modifies the source SQLite file and refuses to run without the explicit quiescence confirmation.
+- Treat `demo_info` as optional in legacy SQLite files; a normal non-demo warehouse need not contain it.
 - `importer.import_bundle(conn, folder, force=False)` continues returning the current report and additionally archives original FIT inputs in the persistent raw volume before decoding.
 
-- [ ] **Step 1: Write migration tests** named `test_sqlite_migration_copies_every_table`, `test_sqlite_migration_is_idempotent`, and `test_sqlite_migration_failure_keeps_source_unchanged`. Populate every legacy table, including `source='fit'`; assert destination parity, idempotent retry, and untouched source bytes.
+- [ ] **Step 1: Write migration tests** named `test_sqlite_migration_copies_every_table`, `test_sqlite_migration_allows_missing_demo_info`, `test_sqlite_migration_is_idempotent_without_overwriting_newer_rows`, `test_sqlite_migration_refuses_nonempty_target`, `test_sqlite_migration_requires_stopped_source`, and `test_sqlite_migration_failure_keeps_source_unchanged`. Populate every required legacy table, including `source='fit'`; assert optional `demo_info`, destination parity, unchanged source bytes/sidecars, and no overwrite on retry.
 - [ ] **Step 2: Run `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test uv run pytest tests/test_sqlite_import.py -q` and confirm failure** because the migrator is not implemented.
-- [ ] **Step 3: Implement transactional migration** using Python `sqlite3` only as a read-only source and psycopg for PostgreSQL. Import all existing daily/activity/sync/raw/demo rows, report per-table counts/date coverage, and rollback the target transaction on any error. Keep the source database and its WAL/SHM files untouched.
+- [ ] **Step 3: Implement transactional migration** using Python `sqlite3` only as a read-only source and psycopg for PostgreSQL. Require `--source-stopped` and document that every process writing the old SQLite warehouse must be stopped before copying the database and WAL/SHM sidecars. Treat `demo_info` as optional. Refuse a non-empty target unless a stored source fingerprint proves this exact import already completed; same-source retries return the recorded result without re-upserting. Store the fingerprint/report marker transactionally, import the existing daily/activity/sync/raw/demo rows, and rollback the target transaction on any error. Keep the source database and its WAL/SHM files untouched.
 - [ ] **Step 4: Write FIT archive tests** named `test_import_archives_fit_source_once` and `test_api_rows_not_overwritten`; assert repeated imports retain one durable copy and preserve current API-over-FIT precedence.
 - [ ] **Step 5: Implement FIT archival** under `<data_dir>/raw/fit/<date>/<bundle-id>/` before decoding; teach raw iteration/reparse to recognize the archive without following arbitrary external paths.
 - [ ] **Step 6: Verify** with `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test uv run pytest tests/test_sqlite_import.py tests/test_importer.py tests/test_raw.py -q`. Expected: migration preserves every table and FIT source files are retained. Commit as `feat: migrate legacy SQLite data safely`.
@@ -120,8 +121,8 @@
 
 **Files:**
 - Create: `src/garmin_mcp/timeseries.py`
-- Modify: `src/garmin_mcp/metrics.py`, `src/garmin_mcp/server.py`
-- Test: `tests/test_timeseries.py`, `tests/test_server.py`
+- Modify: `src/garmin_mcp/metrics.py`, `src/garmin_mcp/server.py`, `src/garmin_mcp/demo.py`, `src/garmin_mcp/cli.py`
+- Test: `tests/test_timeseries.py`, `tests/test_server.py`, `tests/test_demo.py`
 
 **Interfaces:**
 - `timeseries.query_samples(conn, metrics: list[str], start: datetime, end: datetime, timezone: str, limit: int = 1000, offset: int = 0) -> dict` returns `[timestamp, metric, value, unit]` rows, total/truncated metadata, and uses the half-open interval `[start, end)`.
@@ -129,12 +130,13 @@
 - `TimeWindow` is a Pydantic model in `timeseries.py` with `name: str`, `start_time: str` (`HH:MM`), and `end_time: str` (`HH:MM`).
 - Register MCP tools `query_samples` and `compare_time_windows`; existing daily `query_metrics` remains unchanged.
 
-- [ ] **Step 1: Write DB and MCP tool tests** named `test_query_samples_uses_half_open_range`, `test_query_samples_local_time_handles_dst`, `test_compare_windows_midday_vs_evening`, `test_compare_windows_reports_missing_days`, and `test_query_samples_caps_and_paginates`. Assert exact boundary inclusion, timezone grouping, per-day means, sample counts, and cap metadata.
+- [ ] **Step 1: Write DB/MCP/demo-safety tests** named `test_query_samples_uses_half_open_range`, `test_query_samples_local_time_handles_dst`, `test_compare_windows_midday_vs_evening`, `test_compare_windows_reports_missing_days`, `test_query_samples_caps_and_paginates`, `test_demo_refuses_sample_only_real_store`, and `test_demo_force_clears_sample_and_worker_state`. Assert exact query boundaries, timezone grouping, per-day means, sample counts, cap metadata, and that real sample-only data cannot be mixed with generated demo rows.
 - [ ] **Step 2: Run `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test uv run pytest tests/test_timeseries.py tests/test_server.py -q` and confirm the new tests fail.**
 - [ ] **Step 3: Implement** a registry of queryable sample metrics and the range query with a hard maximum of 5,000 rows. Require aware ISO timestamps or apply the configured IANA timezone to naive inputs; return timestamps in UTC plus the source-local timestamp when available.
 - [ ] **Step 4: Implement window comparisons** using caller-named `TimeWindow(name, start_time, end_time)` values. Compute each day’s mean within each window, then compare daily means so days with denser sampling do not dominate; include counts and mark incomplete coverage. Support windows crossing midnight.
 - [ ] **Step 5: Register tools** with FastMCP and preserve current `query_metrics` schemas. Verify compact summaries and bounded raw responses.
-- [ ] **Step 6: Verify**: `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test uv run pytest tests/test_timeseries.py tests/test_server.py -q`. Expected: exact points and valid comparisons are returned without treating absent samples as zero. Commit as `feat: query Garmin samples by time`.
+- [ ] **Step 6: Extend demo data-safety checks.** Include `samples`, `activity_detail_state`, `backfill_state`, and `worker_state` when deciding whether a store contains real data and when clearing a demo store. A sample-only real warehouse must be refused without `--force`; a forced demo must not leave sample/worker rows behind. Keep SQLite migration markers intact. Verify with the two named `tests/test_demo.py` cases from Step 1.
+- [ ] **Step 7: Verify**: `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test uv run pytest tests/test_timeseries.py tests/test_server.py tests/test_demo.py -q`. Expected: exact points and valid comparisons are returned without treating absent samples as zero, and demo data never coexists with real sample/worker rows. Commit as `feat: query Garmin samples by time`.
 
 ### Task 5: Resumable throttled backfill and scheduled worker
 
@@ -188,11 +190,12 @@
 - Compose services: `postgres` (`postgres:17`, health check, private network), `mcp` (`serve-http`), and `sync-worker` (`worker`).
 - Persistent volumes: `postgres_data` for PostgreSQL data and `garmin_data` shared by app/worker for raw snapshots, FIT bundles, and Garmin tokens.
 - Required runtime values: `GARMIN_MCP_DATABASE_URL`, database password, `GARMIN_MCP_HTTP_BEARER_TOKEN`, `GARMIN_MCP_TIMEZONE`, and `GARMIN_MCP_SYNC_TIMES`. Compose provides `GARMIN_MCP_SYNC_TIMES=06:00,18:00` as its editable default; the worker has no fallback schedule.
+- Host publishing uses `GARMIN_MCP_LAN_IP` (safe Compose default `127.0.0.1`) and `GARMIN_MCP_HTTP_PORT` (default `8000`); users set the homelab's private LAN IP in `.env` for other machines to connect.
 
-- [ ] **Step 1: Add deployment/config checks** named `test_compose_keeps_database_private`, `test_compose_publishes_authenticated_mcp_only`, `test_compose_shares_raw_volume_with_worker`, and `test_compose_schedule_override_reaches_worker`; assert the DB port is not published, HTTP port is mapped, PostgreSQL has its own named volume, and changing `.env` schedule values changes the worker environment without an image rebuild.
+- [ ] **Step 1: Add deployment/config checks** named `test_compose_keeps_database_private`, `test_compose_publishes_authenticated_mcp_only`, `test_compose_shares_raw_volume_with_worker`, `test_compose_schedule_override_reaches_worker`, and `test_compose_lan_bind_and_port_are_configurable`; assert PostgreSQL is not published, MCP defaults to loopback, a configured private LAN IP and host port are forwarded, PostgreSQL has its own named volume, and changing schedule values changes the worker environment without rebuilding.
 - [ ] **Step 2: Run `uv run pytest tests/test_deployment.py -q` and confirm failure** because Compose configuration is absent.
-- [ ] **Step 3: Add Compose and container commands** for PostgreSQL, HTTP MCP, and worker. Run the MCP service as `garmin-local-mcp serve-http --host 0.0.0.0 --port 8000`; only this authenticated endpoint is mapped to the LAN. Add PostgreSQL health-gated startup, distinct required credentials, and no public DB listener. Keep CLI login/migrate commands runnable with `docker compose run --rm` using the same app-data volume.
-- [ ] **Step 4: Update README and metadata** with bootstrapping/login, SQLite migration, volume contents/backup and restore, throttled backfill behavior, Compose `.env` schedule/timezone/token settings, HTTPS reverse-proxy caution, and Garmin unofficial API limits. Show how to edit `GARMIN_MCP_SYNC_TIMES` without rebuilding. Add an OpenCode V2 remote config example with `oauth: false` and an Authorization header, plus a Hermes `url`/`headers` example (neither should start OAuth for the static token). Keep published stdio metadata truthful; document remote HTTP separately.
+- [ ] **Step 3: Add Compose and container commands** for PostgreSQL, HTTP MCP, and worker. Run the MCP service as `garmin-local-mcp serve-http --host 0.0.0.0 --port 8000`; publish it only on `${GARMIN_MCP_LAN_IP:-127.0.0.1}` at `${GARMIN_MCP_HTTP_PORT:-8000}`. Add PostgreSQL health-gated startup, distinct required credentials, and no public DB listener. Keep CLI login/migrate commands runnable with `docker compose run --rm` using the same app-data volume.
+- [ ] **Step 4: Update README and metadata** with bootstrapping/login, the stop-all-writers prerequisite for SQLite migration, migration's empty-target/idempotent behavior, optional `demo_info`, volume contents/backup and restore, throttled backfill behavior, Compose `.env` LAN-IP/port/schedule/timezone/token settings, HTTPS reverse-proxy caution, and Garmin unofficial API limits. Show how to edit `GARMIN_MCP_SYNC_TIMES` and `GARMIN_MCP_LAN_IP` without rebuilding. Add an OpenCode V2 remote config example with `oauth: false` and an Authorization header, plus a Hermes `url`/`headers` example (neither should start OAuth for the static token). Keep published stdio metadata truthful; document remote HTTP separately. Update the tool inventory, sample-query/comparison tools, write operations, and effective config defaults.
 - [ ] **Step 5: Verify Compose and CI.** Run `docker compose config`, full tests against `GARMIN_MCP_TEST_DATABASE_URL` (use a temporary PostgreSQL test service published only on loopback when running from the host), then `docker compose up -d` for the deployment smoke test. CI must run all DB tests against PostgreSQL on Ubuntu and parser/config/auth tests on Windows; run Ruff and `uv lock --check`.
 - [ ] **Step 6: Verify persistence** by writing a sample/raw snapshot, recreating app and PostgreSQL containers without removing volumes, and checking the sample and raw file remain available. Commit as `feat: add homelab Docker Compose deployment`.
 
