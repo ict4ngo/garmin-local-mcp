@@ -318,7 +318,7 @@ def import_fit(folder: str) -> dict:
     cfg = _cfg()
     cfg.ensure_dirs()
     with closing(_connect(cfg)) as conn:
-        return importer.import_bundle(conn, Path(folder))
+        return importer.import_bundle(conn, Path(folder), raw_dir=cfg.raw_dir)
 
 
 def serve(cfg: Config | None = None) -> int:

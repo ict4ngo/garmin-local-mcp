@@ -8,23 +8,36 @@ overwritten unless the caller forces it.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from psycopg import Connection
 
+from . import raw
 from .db import upsert
 from .fitdecode import decode_bundle, to_rows
 
 
-def import_bundle(conn: Connection, folder: Path, force: bool = False) -> dict:
-    """Decode one export bundle and upsert its rows. Returns an import report."""
-    decoded = decode_bundle(Path(folder))
+def import_bundle(
+    conn: Connection, folder: Path, force: bool = False, raw_dir: Path | None = None
+) -> dict:
+    """Archive and decode one export bundle, then upsert its rows."""
+    folder = Path(folder)
+    if raw_dir is None:
+        from .config import DEFAULT_DATA_DIR, _resolve_path
+
+        data_dir = _resolve_path(os.environ.get("GARMIN_MCP_DATA_DIR", DEFAULT_DATA_DIR))
+        raw_dir = (data_dir or DEFAULT_DATA_DIR) / "raw"
+    archive = raw.archive_fit_bundle(raw_dir, folder)
+    decoded = decode_bundle(archive or folder)
     date = decoded.get("date")
     if not date:
         raise ValueError(
             f"Could not determine the bundle's date from {folder} "
             "(no timestamps decoded and no YYYY-MM-DD in the folder name)"
         )
+    if archive is not None:
+        raw.finalize_fit_archive(raw_dir, archive, date)
 
     rows = to_rows(decoded)
     report: dict = {"date": date, "imported": [], "skipped": [], "quality_flags": []}

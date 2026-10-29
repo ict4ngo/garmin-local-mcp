@@ -204,7 +204,13 @@ def reparse(config: Config, conn: Connection, progress: Progress = print) -> dic
     Re-runs every parse function, re-registers snapshots in raw_snapshots, and
     restores sync_state coverage so the next `sync` does not re-fetch.
     """
-    report = {"daily_snapshots": 0, "activity_snapshots": 0, "rows": 0, "unknown_endpoints": 0}
+    report = {
+        "daily_snapshots": 0,
+        "activity_snapshots": 0,
+        "fit_bundles": 0,
+        "rows": 0,
+        "unknown_endpoints": 0,
+    }
     for day, name, path in raw.iter_daily_snapshots(config.raw_dir):
         endpoint = ENDPOINTS.get(name)
         if endpoint is None:
@@ -220,24 +226,30 @@ def reparse(config: Config, conn: Connection, progress: Progress = print) -> dic
         report["daily_snapshots"] += 1
         report["rows"] += len(rows)
 
-    activities_dir = config.raw_dir / "activities"
-    if activities_dir.is_dir():
-        parse = ENDPOINTS["activities"].parse
-        for path in sorted(activities_dir.glob("*.json")):
-            item = raw.read_snapshot(path)
-            if not isinstance(item, dict):
-                continue
-            day = activity_date(item)
-            raw.index_snapshot(conn, config.raw_dir, path, day, "activities")
-            rows = parse([item], day or "")
-            fetched_at = db.utcnow()
-            for table, row in rows:
-                db.upsert_partial(conn, table, {**row, "fetched_at": fetched_at}, TABLE_KEYS[table])
-            report["activity_snapshots"] += 1
-            report["rows"] += len(rows)
+    from .importer import import_bundle
+
+    for _, path in raw.iter_fit_archives(config.raw_dir):
+        imported = import_bundle(conn, path, raw_dir=config.raw_dir)
+        report["fit_bundles"] += 1
+        report["rows"] += len(imported["imported"])
+
+    parse = ENDPOINTS["activities"].parse
+    for path in raw.iter_activity_snapshots(config.raw_dir):
+        item = raw.read_snapshot(path)
+        if not isinstance(item, dict):
+            continue
+        day = activity_date(item)
+        raw.index_snapshot(conn, config.raw_dir, path, day, "activities")
+        rows = parse([item], day or "")
+        fetched_at = db.utcnow()
+        for table, row in rows:
+            db.upsert_partial(conn, table, {**row, "fetched_at": fetched_at}, TABLE_KEYS[table])
+        report["activity_snapshots"] += 1
+        report["rows"] += len(rows)
 
     progress(
         f"reparse: {report['daily_snapshots']} daily + {report['activity_snapshots']} activity "
+        f"+ {report['fit_bundles']} FIT bundles "
         f"snapshots -> {report['rows']} rows"
     )
     return report

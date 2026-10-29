@@ -31,3 +31,17 @@ def test_iter_daily_snapshots(tmp_path, postgres_connection):
 
 def test_iter_empty(tmp_path):
     assert list(raw.iter_daily_snapshots(tmp_path / "raw")) == []
+
+
+def test_iter_fit_archives_ignores_symlinks(tmp_path):
+    raw_dir = tmp_path / "raw"
+    archive = raw_dir / "fit" / "2026-06-24" / "bundle-1"
+    archive.mkdir(parents=True)
+    (archive / "sleep.fit").write_bytes(b"fit")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "external.fit").write_bytes(b"outside")
+    (archive / "external.fit").symlink_to(outside / "external.fit")
+    (raw_dir / "fit" / "2026-06-25").symlink_to(outside, target_is_directory=True)
+
+    assert list(raw.iter_fit_archives(raw_dir)) == [("2026-06-24", archive)]

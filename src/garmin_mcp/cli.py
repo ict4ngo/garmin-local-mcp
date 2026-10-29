@@ -7,6 +7,7 @@ subcommand among peers, so the warehouse has value even without an MCP client.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from . import __version__
@@ -129,7 +130,7 @@ def cmd_import_fit(args: argparse.Namespace) -> int:
     config.ensure_dirs()
     conn = db.connect(config.database_url)
     try:
-        report = import_bundle(conn, args.folder, force=args.force)
+        report = import_bundle(conn, args.folder, force=args.force, raw_dir=config.raw_dir)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -141,6 +142,18 @@ def cmd_import_fit(args: argparse.Namespace) -> int:
         print(f"skipped: {', '.join(report['skipped'])}")
     if report["quality_flags"]:
         print(f"quality flags: {', '.join(report['quality_flags'])}")
+    return 0
+
+
+def cmd_migrate_sqlite(args: argparse.Namespace) -> int:
+    from .sqlite_import import migrate_sqlite
+
+    try:
+        report = migrate_sqlite(args.source, args.config.database_url)
+    except Exception as e:
+        print(f"SQLite migration failed: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
 
@@ -253,6 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Overwrite even rows sourced from the API"
     )
     p.set_defaults(func=cmd_import_fit)
+
+    p = sub.add_parser(
+        "migrate-sqlite", help="Copy a legacy SQLite database into the PostgreSQL warehouse"
+    )
+    p.add_argument("--from", dest="source", required=True, metavar="PATH")
+    p.set_defaults(func=cmd_migrate_sqlite)
 
     from .demo import DEMO_DAYS, DEMO_SEED
 
