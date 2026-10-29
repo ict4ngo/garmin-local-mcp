@@ -63,3 +63,45 @@
 
 No Compose schedule defaults or external cron service were added; those remain
 for Task 7. Intended commit: `feat: schedule resumable Garmin syncs`.
+
+## Review round 1
+
+### Findings addressed
+
+- Activity-detail calls now use the same exponential 429 retry and shared
+  PostgreSQL request-pacing path as endpoint fetches. Exhausted detail retries
+  become resumable rate-limit aborts; an initial 429 followed by success stores
+  one detail snapshot/state and one set of samples.
+- Schedule due calculation now checks the latest configured occurrence at or
+  before the current local time, including the previous local day when restart
+  happens before today's first configured time. A persisted catch-up timestamp
+  prevents another catch-up until a later configured occurrence.
+
+### RED/GREEN evidence
+
+- Activity-detail RED command:
+  `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/uv run pytest tests/test_sync.py::test_activity_detail_rate_limit_retries_without_duplicate_data -q`
+  — **1 failed** as expected: `assert sleeps == [3]`, actual `sleeps == []`;
+  only one detail request was attempted.
+- Early-restart schedule RED command:
+  `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/uv run pytest tests/test_worker.py::test_restart_before_first_configured_time_catches_up_once -q`
+  — **1 failed** as expected: `_schedule_is_due(...)` returned `False` at
+  07:00 after the prior day's 18:30 occurrence had been missed.
+- Combined GREEN command:
+  `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/uv run pytest tests/test_sync.py::test_activity_detail_rate_limit_retries_without_duplicate_data tests/test_worker.py::test_restart_before_first_configured_time_catches_up_once -q`
+  — **2 passed**. Detail retry observed the configured 3-second backoff,
+  succeeded on its second request, and left one activity, one detail state,
+  one raw detail snapshot, and four samples. The catch-up test passed once and
+  returned false when given its saved catch-up time.
+
+### Round 1 verification
+
+- Focused worker/sync command:
+  `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/uv run pytest tests/test_worker.py tests/test_sync.py -q`
+  — **29 passed** (one upstream anyio/pytest deprecation warning).
+- Full PostgreSQL suite:
+  `GARMIN_MCP_TEST_DATABASE_URL=postgresql://garmin:garmin@localhost:55432/garmin_test ./.venv/bin/uv run pytest -q`
+  — **173 passed, 1 skipped** (one upstream anyio/pytest deprecation warning).
+- `./.venv/bin/uv run ruff check .` — passed (`All checks passed!`).
+- `./.venv/bin/uv lock --check` — passed.
+- `git diff --check` — passed (no output).

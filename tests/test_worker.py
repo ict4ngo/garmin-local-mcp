@@ -81,6 +81,15 @@ def test_missed_schedule_occurrences_coalesce_after_restart(config):
     assert not worker._schedule_is_due(now, config.sync_times, now.isoformat())
 
 
+def test_restart_before_first_configured_time_catches_up_once(config):
+    timezone = ZoneInfo(config.timezone)
+    now = datetime(2026, 6, 3, 7, 0, tzinfo=timezone)
+    previous_run = datetime(2026, 6, 2, 9, 0, tzinfo=timezone).isoformat()
+
+    assert worker._schedule_is_due(now, config.sync_times, previous_run)
+    assert not worker._schedule_is_due(now, config.sync_times, now.isoformat())
+
+
 def test_worker_requires_configured_schedule(tmp_path, monkeypatch):
     monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", "postgresql://garmin:garmin@localhost/garmin_test")
     monkeypatch.delenv("GARMIN_MCP_SYNC_TIMES", raising=False)

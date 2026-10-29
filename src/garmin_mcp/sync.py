@@ -85,9 +85,7 @@ def _is_auth(exc: BaseException) -> bool:
 
 
 def _fetch_with_backoff(
-    endpoint: Endpoint,
-    client,
-    day: str,
+    fetch: Callable[[], object],
     progress: Progress,
     before_request: Callable[[], None] | None = None,
 ):
@@ -96,7 +94,7 @@ def _fetch_with_backoff(
         try:
             if before_request is not None:
                 before_request()
-            return endpoint.fetch(client, day)
+            return fetch()
         except AuthError:
             raise
         except Exception as e:
@@ -172,8 +170,13 @@ def _store(
             ).fetchone()
             if known:
                 continue
-            db.throttle_garmin_request(conn, config.request_delay_seconds, _sleep)
-            details = client.get_activity_details(activity_id)
+            details = _fetch_with_backoff(
+                lambda activity_id=activity_id: client.get_activity_details(activity_id),
+                lambda message: None,
+                before_request=lambda: db.throttle_garmin_request(
+                    conn, config.request_delay_seconds, _sleep
+                ),
+            )
             activity_day = activity_date(item, day) or day
             detail_path = raw.write_versioned_snapshot(
                 conn, config.raw_dir, details, activity_day, "activity_details", fetched_at_text,
@@ -247,9 +250,7 @@ def _sync_range(
                 continue
             try:
                 payload = _fetch_with_backoff(
-                    endpoint,
-                    client,
-                    day,
+                    lambda endpoint=endpoint, day=day: endpoint.fetch(client, day),
                     progress,
                     before_request=lambda: db.throttle_garmin_request(
                         conn, config.request_delay_seconds, _sleep
@@ -278,6 +279,21 @@ def _sync_range(
                 continue
             try:
                 n_rows = _store(config, conn, endpoint, day, payload, client)
+            except RateLimitAbort as e:
+                db.mark_sync(conn, name, day, "error", f"rate limited: {e}")
+                stats["error"] += 1
+                report["aborted"] = "rate_limited"
+                report["resumable"] = True
+                progress(f"{day} {name}: rate limited - aborting; re-run to resume")
+                return report
+            except AuthError as e:
+                db.mark_sync(conn, name, day, "error", str(e))
+                stats["error"] += 1
+                report["aborted"] = "auth"
+                report["resumable"] = True
+                report["auth_error"] = e.to_dict()
+                progress(f"{day} {name}: auth error - aborting ({e.hint})")
+                return report
             except Exception as e:
                 db.mark_sync(conn, name, day, "error", f"parse/store: {e}")
                 stats["error"] += 1

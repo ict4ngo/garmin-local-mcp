@@ -433,3 +433,40 @@ def test_activity_detail_fetch_is_not_repeated(config):
     assert conn.execute(
         "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint='activities'"
     ).fetchone()["count"] == 4
+
+
+def test_activity_detail_rate_limit_retries_without_duplicate_data(config, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(sync, "_sleep", sleeps.append)
+    monkeypatch.setattr(sync, "BACKOFF_SECONDS", (3, 6))
+
+    class RateLimitedDetailClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.detail_calls = 0
+
+        def get_activity_details(self, activity_id):
+            self.detail_calls += 1
+            if self.detail_calls == 1:
+                raise GarminConnectTooManyRequestsError("429 rate limited")
+            return load("activity_detail_samples")
+
+    conn = db.connect(config.database_url)
+    client = RateLimitedDetailClient()
+    report = sync.sync_range(
+        config, conn, client, DAY1, DAY1, endpoints=["activities"], progress=quiet
+    )
+
+    assert sleeps == [3]
+    assert client.detail_calls == 2
+    assert report["aborted"] is None
+    assert report["endpoints"]["activities"]["ok"] == 1
+    assert conn.execute("SELECT COUNT(*) AS count FROM activities").fetchone()["count"] == 1
+    assert conn.execute("SELECT COUNT(*) AS count FROM samples").fetchone()["count"] == 4
+    assert (
+        conn.execute("SELECT COUNT(*) AS count FROM activity_detail_state").fetchone()["count"]
+        == 1
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint='activity_details'"
+    ).fetchone()["count"] == 1

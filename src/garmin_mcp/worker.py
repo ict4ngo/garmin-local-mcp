@@ -32,7 +32,13 @@ def _scheduled_occurrence(now: datetime, times: tuple[str, ...]) -> datetime | N
         for value in times
     ]
     due = [value for value in occurrences if value <= now]
-    return max(due) if due else None
+    if due:
+        return max(due)
+    previous_day = now.date() - timedelta(days=1)
+    return max(
+        datetime.combine(previous_day, time_type.fromisoformat(value), tzinfo=now.tzinfo)
+        for value in times
+    )
 
 
 def _schedule_is_due(now: datetime, times: tuple[str, ...], last_run: str | None) -> bool:
@@ -40,7 +46,7 @@ def _schedule_is_due(now: datetime, times: tuple[str, ...], last_run: str | None
     if occurrence is None:
         return False
     if last_run is None:
-        return True
+        return occurrence.date() == now.date()
     previous = datetime.fromisoformat(last_run)
     if previous.tzinfo is None:
         previous = previous.replace(tzinfo=now.tzinfo)
