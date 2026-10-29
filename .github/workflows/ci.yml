@@ -37,6 +37,8 @@ jobs:
         run: pip install -e .[dev]
       - name: Lint
         run: ruff check .
+      - name: Validate Docker Compose deployment
+        run: docker compose --env-file .env.example config --quiet
       - name: Test
         run: pytest -q
 

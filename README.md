@@ -20,7 +20,7 @@ servers go completely dark, even for data they already fetched yesterday.
 This project inverts the architecture:
 
 - **Sync once, analyze forever.** Incremental sync into a local warehouse:
-  immutable raw JSON snapshots plus a SQLite database, in a directory you own.
+  immutable raw JSON snapshots plus a PostgreSQL database, in storage you own.
 - **Server-side analysis, compact responses.** Trends, correlations, personal
   baselines, and anomaly detection are computed locally and returned as small
   columnar tables in a single tool call. Typical responses are under 2 KB, so
@@ -35,7 +35,7 @@ This project inverts the architecture:
 
 | | garmin-local-mcp | Typical API-wrapper Garmin MCPs |
 |---|---|---|
-| Local data store you own | Yes (raw JSON + SQLite) | No |
+| Local data store you own | Yes (raw JSON + PostgreSQL) | No |
 | Works offline after an API breakage | Yes (analysis over synced history) | No |
 | Server-side analysis (trends, correlations, baselines, anomalies) | Yes | No (raw JSON pass-through) |
 | Response size discipline | Compact columnar tables, typically < 2 KB | Raw payloads, up to hundreds of KB |
@@ -46,6 +46,10 @@ This project inverts the architecture:
 
 If you don't own a Garmin, or just want to see what the tools return before
 handing over credentials, seed a synthetic store:
+
+This still requires a reachable PostgreSQL database configured through
+`GARMIN_MCP_DATABASE_URL`, `GARMIN_MCP_TIMEZONE`, and
+`GARMIN_MCP_SYNC_TIMES`; it avoids Garmin login/API access, not the database.
 
 ```
 pip install garmin-local-mcp
@@ -74,9 +78,137 @@ never present generated numbers as real measurements. The generator is
 deterministic — `--seed` reproduces a store exactly, and `--days` changes the
 range. `demo` refuses to overwrite a database it did not generate.
 
+## Docker Compose deployment
+
+Docker Compose runs PostgreSQL 17, the authenticated Streamable HTTP MCP server,
+and the scheduled sync worker. Docker is the only host runtime dependency.
+PostgreSQL is not published to the host; only the MCP HTTP port is exposed on
+port 8000. The HTTP server requires a static Bearer token.
+
+```sh
+cp .env.example .env
+```
+
+Edit `.env` before starting. Replace **all** `REPLACE_...` placeholders. Make
+two different strong secrets (hex avoids URL-escaping problems in the database
+URL), for example:
+
+```sh
+openssl rand -hex 32  # use one result for POSTGRES_PASSWORD
+openssl rand -hex 32  # use a different result for GARMIN_MCP_HTTP_BEARER_TOKEN
+```
+
+Set `GARMIN_MCP_TIMEZONE` to your IANA timezone (for example
+`America/Denver`). Protect the file with `chmod 600 .env` and do not commit it.
+The Compose schedule default is `06:00,18:00`; edit `GARMIN_MCP_SYNC_TIMES` in
+`.env` to any comma-separated local `HH:MM` times. For example, setting it to
+`07:15,21:45` changes the worker schedule on the next container recreation; it
+does not require an image rebuild. The worker itself has no fallback schedule.
+
+Log in and start the services:
+
+```sh
+docker compose run --rm mcp login
+docker compose up -d
+```
+
+The login command stores Garmin tokens in the shared `garmin_data` volume.
+Initial history collection and subsequent resumable, throttled backfill run in
+the worker; scheduled syncs run at the configured times. For an explicit sync
+or to inspect status, use `docker compose run --rm mcp sync --from 2026-01-01`
+or `docker compose run --rm mcp status`. CLI commands use the same PostgreSQL
+settings and app-data volume as the services.
+
+To migrate an existing SQLite warehouse, place the legacy database in the
+shared data volume and run the installed migration command:
+
+```sh
+docker compose up -d postgres mcp
+docker compose cp ./garmin.db mcp:/data/legacy.db
+docker compose run --rm mcp migrate-sqlite --from /data/legacy.db
+docker compose up -d
+```
+
+The `postgres_data` volume holds only PostgreSQL's database files. The separate
+`garmin_data` volume, shared by MCP and worker, holds Garmin tokens, immutable
+raw API snapshots, and FIT bundles/files saved there. Back up both volumes;
+they contain sensitive health information. For a consistent backup, stop the
+worker and MCP writer (leave PostgreSQL running), then dump PostgreSQL and
+archive the app-data volume:
+
+```sh
+mkdir -p backups
+docker compose stop sync-worker mcp
+docker compose exec -T postgres pg_dump -U garmin -d garmin -Fc > backups/garmin.dump
+docker compose run --rm --no-deps --entrypoint tar mcp -czf - -C /data . > backups/garmin-data.tar.gz
+docker compose start mcp sync-worker
+```
+
+Restore into a new/empty deployment after ensuring the named volumes are not in
+use. Start PostgreSQL but keep MCP and the worker stopped; restore the files
+first, then PostgreSQL:
+
+```sh
+docker compose stop sync-worker mcp
+docker compose up -d postgres
+docker compose run --rm --no-deps --entrypoint tar mcp -xzf - -C /data < backups/garmin-data.tar.gz
+docker compose exec -T postgres pg_restore -U garmin -d garmin --clean --if-exists < backups/garmin.dump
+docker compose start mcp sync-worker
+```
+
+Keep off-host encrypted copies of both backups. Do not use `docker compose down
+-v` for normal maintenance: it deletes the named volumes and all stored data.
+
+### Remote HTTP clients
+
+The HTTP endpoint is `http://<docker-host>:8000/mcp`. Use the configured static
+Bearer token. **Plain HTTP does not encrypt credentials or health data**: keep
+this endpoint on a trusted LAN, restrict port 8000 with your firewall, and
+never expose it directly to the Internet. For remote access, put it behind a
+TLS-terminating reverse proxy (and keep the upstream network private); do not
+assume the bearer token is a substitute for HTTPS.
+
+OpenCode V2 remote MCP configuration (for example in `opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "garmin": {
+      "type": "remote",
+      "url": "https://garmin.example.com/mcp",
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer REPLACE_WITH_GARMIN_MCP_HTTP_BEARER_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Hermes remote MCP configuration uses the URL and static headers directly; it
+does not start OAuth:
+
+```yaml
+mcp_servers:
+  garmin:
+    url: https://garmin.example.com/mcp
+    headers:
+      Authorization: "Bearer REPLACE_WITH_GARMIN_MCP_HTTP_BEARER_TOKEN"
+```
+
+Use the reverse-proxy HTTPS URL in these examples, replace the token placeholder,
+and keep client config files private. The published MCP package metadata remains
+for the **stdio** transport; remote HTTP is a separate Compose deployment.
+Direct stdio runs also require a PostgreSQL URL, timezone, and sync schedule
+environment variables. The database URL is a secret because it contains DB
+credentials.
+
 ## Quickstart
 
-Requires Python 3.12+.
+Requires Python 3.12+ and a PostgreSQL database. Set `GARMIN_MCP_DATABASE_URL`,
+`GARMIN_MCP_TIMEZONE`, and `GARMIN_MCP_SYNC_TIMES` in the environment for every
+CLI/stdio process. The Docker Compose setup above supplies these values.
 
 ```
 pip install garmin-local-mcp
@@ -212,8 +344,10 @@ an unknown name returns the full list.
 
 ## Data layout and ownership
 
-Everything lives in one directory you own (default `~/.garmin-mcp`, override
-with the `GARMIN_MCP_DATA_DIR` environment variable or `--data-dir`):
+App files live in one directory you own (default `~/.garmin-mcp`, override
+with the `GARMIN_MCP_DATA_DIR` environment variable or `--data-dir`); the
+PostgreSQL database is configured separately through
+`GARMIN_MCP_DATABASE_URL`:
 
 ```
 ~/.garmin-mcp/
@@ -221,14 +355,13 @@ with the `GARMIN_MCP_DATA_DIR` environment variable or `--data-dir`):
 ├── tokens/                                      # Garmin Connect session tokens
 ├── raw/daily/YYYY/YYYY-MM-DD/<endpoint>.json    # immutable raw API snapshots
 ├── raw/activities/<activity_id>.json            # one snapshot per activity
-└── garmin.db                                    # SQLite warehouse
+└── ...                                          # raw snapshots, tokens, and saved FIT bundles
 ```
 
-The raw JSON snapshots are the source of truth and are never overwritten. The
-SQLite database is a derived, rebuildable index: `garmin-local-mcp reparse`
-rebuilds it from the raw snapshots entirely offline, which is the universal
-escape hatch for schema evolution and parser fixes. Your data never leaves
-your machine.
+The raw JSON snapshots are the source of truth and are never overwritten.
+`garmin-local-mcp reparse` rebuilds the PostgreSQL tables from raw snapshots
+entirely offline, which is the universal escape hatch for schema evolution and
+parser fixes. Your data stays on infrastructure you control.
 
 ## Data quality note
 
@@ -318,6 +451,10 @@ Environment variables:
 | Variable | Meaning |
 |---|---|
 | `GARMIN_MCP_DATA_DIR` | Override the data directory (default `~/.garmin-mcp`) |
+| `GARMIN_MCP_DATABASE_URL` | Required PostgreSQL connection URL; contains database credentials and must be kept secret |
+| `GARMIN_MCP_TIMEZONE` | Required IANA timezone for local dates and scheduling |
+| `GARMIN_MCP_SYNC_TIMES` | Required comma-separated local `HH:MM` schedule for the worker (Compose default: `06:00,18:00`) |
+| `GARMIN_MCP_HTTP_BEARER_TOKEN` | Required static Bearer token for `serve-http`; not needed for stdio |
 | `GARMINTOKENS` | Override the token store location (default `<data_dir>/tokens`) |
 | `GARMIN_EMAIL` / `GARMIN_PASSWORD` | Optional, for non-interactive re-login; when set, `garmin-local-mcp login` skips the prompts (MFA may still prompt if your account requires it) |
 
@@ -338,12 +475,14 @@ FIT samples; CI never touches the live API.
 This project is not affiliated with, endorsed by, or supported by Garmin Ltd.
 It uses the community [python-garminconnect](https://github.com/cyberjunky/python-garminconnect)
 library with your own credentials to access your own data. Garmin's APIs are
-unofficial and can change or break at any time; when that happens, your synced
-history remains fully usable and the FIT import path keeps working.
+unofficial, rate-limited, and can change or break at any time. Sync is
+intentionally throttled, but Garmin may still rate-limit or block requests;
+there is no guaranteed API quota or availability. When the API changes, your
+synced history remains fully usable and the FIT import path keeps working.
 
-All data stays on your machine. Nothing phones home: no telemetry, no
-third-party services, no cloud. Treat your data directory like the personal
-health record it is, and never commit it to a repository.
+All data stays on infrastructure you control. Nothing phones home: no
+telemetry, no third-party services, no cloud. Treat your data directory like
+the personal health record it is, and never commit it to a repository.
 
 ## License
 
