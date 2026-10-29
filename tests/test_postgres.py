@@ -132,4 +132,4 @@ def test_test_database_url_rejects_preexisting_application_url_across_aliases():
 def test_runtime_dependency_floors():
     project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
     assert "mcp>=1.30,<2" in project["dependencies"]
-    assert "garminconnect>=0.3.7,<0.4" in project["dependencies"]
+    assert "garminconnect>=0.3.19,<0.4" in project["dependencies"]
