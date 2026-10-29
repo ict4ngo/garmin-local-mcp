@@ -11,29 +11,31 @@ from datetime import UTC, datetime
 import psycopg
 from psycopg.rows import dict_row
 
-# Each entry is a full DDL script bringing the schema from version-1 to version.
-# Additive changes only; anything structural goes through reparse.
+# Each entry is a DDL script bringing the schema from version-1 to version.
+# Additive changes and lossless widening conversions only; destructive changes
+# go through reparse.
 MIGRATIONS: dict[int, str] = {
     1: """
     CREATE TABLE daily_wellness (
       date TEXT PRIMARY KEY,
       resting_hr INT, min_hr INT, max_hr INT,
-      steps INT, distance_m REAL, floors_up INT,
+      steps INT, distance_m DOUBLE PRECISION, floors_up INT,
       stress_avg INT, stress_max INT,
       body_battery_high INT, body_battery_low INT,
       calories_total INT, calories_active INT,
-      spo2_avg REAL, respiration_avg REAL,
-      skin_temp_dev_c REAL,
+      spo2_avg DOUBLE PRECISION, respiration_avg DOUBLE PRECISION,
+      skin_temp_dev_c DOUBLE PRECISION,
       intensity_min_moderate INT, intensity_min_vigorous INT,
       source TEXT CHECK(source IN ('api','fit')), fetched_at TEXT
     );
 
     CREATE TABLE sleep (
       date TEXT PRIMARY KEY,
-      score INT, duration_min REAL,
+      score INT, duration_min DOUBLE PRECISION,
       deep_min INT, light_min INT, rem_min INT, awake_min INT,
       start_ts TEXT, end_ts TEXT,
-      avg_spo2 REAL, avg_respiration REAL, avg_stress INT, restless_moments INT,
+      avg_spo2 DOUBLE PRECISION, avg_respiration DOUBLE PRECISION,
+      avg_stress INT, restless_moments INT,
       nap_min INT,
       quality_flags TEXT,
       source TEXT CHECK(source IN ('api','fit')), fetched_at TEXT
@@ -50,17 +52,19 @@ MIGRATIONS: dict[int, str] = {
     CREATE TABLE activities (
       activity_id BIGINT PRIMARY KEY,
       date TEXT, start_ts TEXT, name TEXT, type TEXT,
-      duration_s REAL, distance_m REAL, elevation_gain_m REAL,
-      avg_hr INT, max_hr INT, calories INT, avg_pace_s_per_km REAL,
-      training_load REAL, aerobic_te REAL, anaerobic_te REAL,
+      duration_s DOUBLE PRECISION, distance_m DOUBLE PRECISION,
+      elevation_gain_m DOUBLE PRECISION,
+      avg_hr INT, max_hr INT, calories INT, avg_pace_s_per_km DOUBLE PRECISION,
+      training_load DOUBLE PRECISION, aerobic_te DOUBLE PRECISION,
+      anaerobic_te DOUBLE PRECISION,
       raw_path TEXT, fetched_at TEXT
     );
     CREATE INDEX ix_activities_date ON activities(date);
     CREATE INDEX ix_activities_type ON activities(type);
 
     CREATE TABLE training_status (
-      date TEXT PRIMARY KEY, status TEXT, vo2max REAL,
-      acute_load REAL, load_ratio REAL, fetched_at TEXT
+      date TEXT PRIMARY KEY, status TEXT, vo2max DOUBLE PRECISION,
+      acute_load DOUBLE PRECISION, load_ratio DOUBLE PRECISION, fetched_at TEXT
     );
 
     CREATE TABLE raw_snapshots (
@@ -80,8 +84,48 @@ MIGRATIONS: dict[int, str] = {
     );
     """,
     2: """
-    ALTER TABLE training_status ADD COLUMN fitness_age REAL;
-    ALTER TABLE training_status ADD COLUMN achievable_fitness_age REAL;
+    ALTER TABLE training_status ADD COLUMN fitness_age DOUBLE PRECISION;
+    ALTER TABLE training_status ADD COLUMN achievable_fitness_age DOUBLE PRECISION;
+    """,
+    3: """
+    ALTER TABLE daily_wellness ALTER COLUMN distance_m TYPE DOUBLE PRECISION
+      USING distance_m::DOUBLE PRECISION;
+    ALTER TABLE daily_wellness ALTER COLUMN spo2_avg TYPE DOUBLE PRECISION
+      USING spo2_avg::DOUBLE PRECISION;
+    ALTER TABLE daily_wellness ALTER COLUMN respiration_avg TYPE DOUBLE PRECISION
+      USING respiration_avg::DOUBLE PRECISION;
+    ALTER TABLE daily_wellness ALTER COLUMN skin_temp_dev_c TYPE DOUBLE PRECISION
+      USING skin_temp_dev_c::DOUBLE PRECISION;
+    ALTER TABLE sleep ALTER COLUMN duration_min TYPE DOUBLE PRECISION
+      USING duration_min::DOUBLE PRECISION;
+    ALTER TABLE sleep ALTER COLUMN avg_spo2 TYPE DOUBLE PRECISION
+      USING avg_spo2::DOUBLE PRECISION;
+    ALTER TABLE sleep ALTER COLUMN avg_respiration TYPE DOUBLE PRECISION
+      USING avg_respiration::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN duration_s TYPE DOUBLE PRECISION
+      USING duration_s::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN distance_m TYPE DOUBLE PRECISION
+      USING distance_m::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN elevation_gain_m TYPE DOUBLE PRECISION
+      USING elevation_gain_m::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN avg_pace_s_per_km TYPE DOUBLE PRECISION
+      USING avg_pace_s_per_km::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN training_load TYPE DOUBLE PRECISION
+      USING training_load::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN aerobic_te TYPE DOUBLE PRECISION
+      USING aerobic_te::DOUBLE PRECISION;
+    ALTER TABLE activities ALTER COLUMN anaerobic_te TYPE DOUBLE PRECISION
+      USING anaerobic_te::DOUBLE PRECISION;
+    ALTER TABLE training_status ALTER COLUMN vo2max TYPE DOUBLE PRECISION
+      USING vo2max::DOUBLE PRECISION;
+    ALTER TABLE training_status ALTER COLUMN acute_load TYPE DOUBLE PRECISION
+      USING acute_load::DOUBLE PRECISION;
+    ALTER TABLE training_status ALTER COLUMN load_ratio TYPE DOUBLE PRECISION
+      USING load_ratio::DOUBLE PRECISION;
+    ALTER TABLE training_status ALTER COLUMN fitness_age TYPE DOUBLE PRECISION
+      USING fitness_age::DOUBLE PRECISION;
+    ALTER TABLE training_status ALTER COLUMN achievable_fitness_age TYPE DOUBLE PRECISION
+      USING achievable_fitness_age::DOUBLE PRECISION;
     """,
 }
 

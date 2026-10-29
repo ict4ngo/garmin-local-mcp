@@ -32,8 +32,8 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     # mcp 2.0.0 (2026-07-28) is a major rework that removed mcp.server.fastmcp;
     # stay on 1.x until the server is ported to the v2 API.
-    "mcp>=1.0,<2",
-    "garminconnect>=0.3.6,<0.4",
+    "mcp>=1.30,<2",
+    "garminconnect>=0.3.7,<0.4",
     "fitparse>=1.2",
     # zoneinfo has no bundled tz database on Windows
     "tzdata; sys_platform == 'win32'",

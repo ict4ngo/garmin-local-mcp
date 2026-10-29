@@ -1,3 +1,6 @@
+import tomllib
+from pathlib import Path
+
 import pytest
 
 from garmin_mcp import db
@@ -75,3 +78,46 @@ def test_transaction_rolls_back(postgres_connection):
 
     count = postgres_connection.execute("SELECT COUNT(*) AS n FROM daily_wellness").fetchone()["n"]
     assert count == 0
+
+
+def test_real_values_preserve_double_precision(postgres_connection):
+    value = 12345.678901234567
+    db.upsert(
+        postgres_connection,
+        "daily_wellness",
+        {"date": "2026-07-01", "distance_m": value},
+        ("date",),
+    )
+    stored = postgres_connection.execute(
+        "SELECT distance_m FROM daily_wellness WHERE date=%s", ("2026-07-01",)
+    ).fetchone()["distance_m"]
+    assert stored == value
+
+
+def test_test_database_url_is_safely_isolated(test_database_url):
+    from psycopg.conninfo import conninfo_to_dict
+
+    assert conninfo_to_dict(test_database_url)["dbname"].endswith("_test")
+
+
+def test_test_database_url_rejects_non_test_database(monkeypatch, request):
+    monkeypatch.setenv(
+        "GARMIN_MCP_TEST_DATABASE_URL", "postgresql://garmin:garmin@localhost:55432/garmin"
+    )
+    monkeypatch.delenv("GARMIN_MCP_DATABASE_URL", raising=False)
+    with pytest.raises(pytest.fail.Exception, match="database name must end in _test"):
+        request.getfixturevalue("test_database_url")
+
+
+def test_test_database_url_rejects_application_database(monkeypatch, request):
+    database_url = "postgresql://garmin:garmin@localhost:55432/garmin_test"
+    monkeypatch.setenv("GARMIN_MCP_TEST_DATABASE_URL", database_url)
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", database_url)
+    with pytest.raises(pytest.fail.Exception, match="must differ from GARMIN_MCP_DATABASE_URL"):
+        request.getfixturevalue("test_database_url")
+
+
+def test_runtime_dependency_floors():
+    project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+    assert "mcp>=1.30,<2" in project["dependencies"]
+    assert "garminconnect>=0.3.7,<0.4" in project["dependencies"]

@@ -42,7 +42,7 @@ def test_migration_v2_adds_fitness_age_columns(postgres_connection):
         )
     }
     assert {"fitness_age", "achievable_fitness_age"} <= cols
-    assert db.SCHEMA_VERSION == 2
+    assert db.SCHEMA_VERSION == 3
     db.upsert(
         postgres_connection,
         "training_status",
