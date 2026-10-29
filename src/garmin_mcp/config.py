@@ -132,6 +132,14 @@ def _required_env(name: str) -> str:
     return value
 
 
+def http_bearer_token() -> str:
+    """Return the manually provisioned HTTP token without exposing its value."""
+    value = os.environ.get("GARMIN_MCP_HTTP_BEARER_TOKEN", "").strip()
+    if not value:
+        raise ValueError("GARMIN_MCP_HTTP_BEARER_TOKEN is required for HTTP serving")
+    return value
+
+
 def _schedule() -> tuple[str, ...]:
     raw = _required_env("GARMIN_MCP_SYNC_TIMES")
     values = [item.strip() for item in raw.split(",")]

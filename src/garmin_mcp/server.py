@@ -30,7 +30,7 @@ DEFAULT_RANGE_DAYS = 30
 
 _TABLES = ("daily_wellness", "sleep", "hrv", "training_status", "activities")
 
-mcp = FastMCP("garmin")
+mcp = FastMCP("garmin", json_response=True, stateless_http=True)
 
 _config: Config | None = None
 
@@ -402,4 +402,24 @@ def serve(cfg: Config | None = None) -> int:
     if cfg is not None:
         _config = cfg
     mcp.run(transport="stdio")
+    return 0
+
+
+def serve_http(
+    cfg: Config | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> int:
+    """Run the Bearer-protected Streamable HTTP MCP server."""
+    token = config.http_bearer_token()
+    if cfg is not None:
+        global _config
+        _config = cfg
+
+    import uvicorn
+
+    from .http_auth import create_http_app
+
+    uvicorn.run(create_http_app(mcp, token), host=host, port=port)
     return 0

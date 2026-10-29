@@ -20,6 +20,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return serve(args.config)
 
 
+def cmd_serve_http(args: argparse.Namespace) -> int:
+    from .server import serve_http
+
+    return serve_http(args.config, host=args.host, port=args.port)
+
+
 def cmd_worker(args: argparse.Namespace) -> int:
     from .worker import run_worker
 
@@ -263,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="Run the stdio MCP server (never prompts)")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("serve-http", help="Run the Bearer-protected Streamable HTTP MCP server")
+    p.add_argument("--host", default="127.0.0.1", help="Address to bind (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
+    p.set_defaults(func=cmd_serve_http)
 
     p = sub.add_parser("worker", help="Run the scheduled sync and history backfill worker")
     p.set_defaults(func=cmd_worker)

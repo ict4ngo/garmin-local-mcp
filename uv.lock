@@ -312,7 +312,9 @@ dependencies = [
     { name = "garminconnect" },
     { name = "mcp" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "starlette" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -329,7 +331,9 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "starlette", specifier = ">=1,<2" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "uvicorn", specifier = ">=0.52,<1" },
 ]
 provides-extras = ["dev"]
 

@@ -7,11 +7,16 @@ the server's cached config is reset per test. No network anywhere.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from garmin_mcp import db, server
 
@@ -52,6 +57,30 @@ def seed_month(data_dir) -> None:
 def test_all_fourteen_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
+
+
+def test_stdio_tools_remain_registered(data_dir):
+    async def list_stdio_tools() -> set[str]:
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[
+                "-c",
+                "from garmin_mcp.cli import main; raise SystemExit(main())",
+                "serve",
+            ],
+            env=os.environ.copy(),
+            cwd=Path(__file__).parents[1],
+        )
+        async with stdio_client(parameters) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                result = await session.call_tool("auth_status", {})
+                assert result.isError is False
+                assert json.loads(result.content[0].text)["logged_in"] is False
+                return {tool.name for tool in tools.tools}
+
+    assert asyncio.run(list_stdio_tools()) == EXPECTED_TOOLS
 
 
 def test_auth_status_without_tokens(data_dir):
