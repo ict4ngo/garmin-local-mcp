@@ -1,6 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from garmin_mcp.config import DEFAULT_DATA_DIR, load
+
+
+@pytest.fixture(autouse=True)
+def database_url(monkeypatch):
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", "postgresql://garmin:garmin@localhost/garmin")
 
 
 def test_defaults(tmp_path, monkeypatch):
@@ -12,7 +19,7 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.request_delay_seconds == 1.0
     assert cfg.baseline_window_days == 28
     assert cfg.timezone is None
-    assert cfg.db_path == tmp_path / "garmin.db"
+    assert cfg.database_url == "postgresql://garmin:garmin@localhost/garmin"
     assert cfg.raw_dir == tmp_path / "raw"
     assert cfg.tokens_dir == tmp_path / "tokens"
 
@@ -71,3 +78,9 @@ def test_tokens_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("GARMINTOKENS", str(tmp_path / "tok"))
     cfg = load(tmp_path)
     assert cfg.tokens_dir == tmp_path / "tok"
+
+
+def test_database_url_is_required(tmp_path, monkeypatch):
+    monkeypatch.delenv("GARMIN_MCP_DATABASE_URL")
+    with pytest.raises(ValueError, match="GARMIN_MCP_DATABASE_URL is required"):
+        load(tmp_path)

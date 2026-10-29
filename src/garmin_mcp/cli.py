@@ -62,10 +62,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(f"{e} ({e.hint})", file=sys.stderr)
         return 1
 
-    conn = db.connect(config.db_path)
-    report = sync.sync_range(
-        config, conn, client, start, end, endpoints=endpoints, force=args.force
-    )
+    conn = db.connect(config.database_url)
+    try:
+        report = sync.sync_range(
+            config, conn, client, start, end, endpoints=endpoints, force=args.force
+        )
+    finally:
+        conn.close()
     print(f"sync {report['start']}..{report['end']}: "
           f"{report['requests']} requests, {report['rows']} rows")
     for name, s in report["endpoints"].items():
@@ -85,18 +88,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     from . import db
 
     config = args.config
-    if not config.db_path.is_file():
-        print(f"No database yet at {config.db_path} - run: garmin-local-mcp sync")
-        return 0
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     print(f"data dir: {config.data_dir}")
     print("coverage:")
+    has_data = False
     for table in ("daily_wellness", "sleep", "hrv", "training_status", "activities"):
-        first, last, count = conn.execute(
-            f"SELECT MIN(date), MAX(date), COUNT(*) FROM {table}"  # noqa: S608 - fixed names
+        coverage = conn.execute(
+            f"SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS count FROM {table}"  # noqa: S608 - fixed names
         ).fetchone()
-        span = f"{first} .. {last}" if count else "(no data)"
-        print(f"  {table:16} {count:6} rows  {span}")
+        has_data = has_data or coverage["count"] > 0
+        span = (
+            f"{coverage['first']} .. {coverage['last']}"
+            if coverage["count"]
+            else "(no data)"
+        )
+        print(f"  {table:16} {coverage['count']:6} rows  {span}")
+    if not has_data:
+        print("No database rows yet - run: garmin-local-mcp sync")
+        conn.close()
+        return 0
     errors = conn.execute(
         "SELECT endpoint, date, last_error FROM sync_state "
         "WHERE status='error' ORDER BY date, endpoint"
@@ -107,6 +117,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"  {row['date']} {row['endpoint']}: {row['last_error']}")
     else:
         print("pending sync errors: none")
+    conn.close()
     return 0
 
 
@@ -116,12 +127,14 @@ def cmd_import_fit(args: argparse.Namespace) -> int:
 
     config = args.config
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     try:
         report = import_bundle(conn, args.folder, force=args.force)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 1
+    finally:
+        conn.close()
     print(f"date: {report['date']}")
     print(f"imported: {', '.join(report['imported']) or '(nothing)'}")
     if report["skipped"]:
@@ -135,27 +148,33 @@ def cmd_demo(args: argparse.Namespace) -> int:
     from . import db, demo
 
     config = args.config
-    if config.db_path.is_file():
-        conn = db.connect(config.db_path)
-        # Never overwrite real data. A demo store may be regenerated freely.
-        generated = demo.is_demo(conn)
-        conn.close()
-        if not generated and not args.force:
-            print(
-                f"{config.db_path} already exists and does not look like a demo store.\n"
-                f"Refusing to overwrite real data. Use a separate directory:\n"
-                f"  garmin-local-mcp --data-dir ~/.garmin-mcp-demo demo\n"
-                f"or pass --force if you are certain.",
-                file=sys.stderr,
-            )
-            return 2
-        config.db_path.unlink()
-        for suffix in ("-wal", "-shm"):
-            sidecar = config.db_path.with_name(config.db_path.name + suffix)
-            sidecar.unlink(missing_ok=True)
-
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
+    generated = demo.is_demo(conn)
+    has_data = any(
+        conn.execute(f"SELECT EXISTS (SELECT 1 FROM {table}) AS present").fetchone()["present"]
+        for table in (
+            "daily_wellness", "sleep", "hrv", "activities", "training_status",
+            "raw_snapshots", "sync_state",
+        )
+    )
+    if has_data and not generated and not args.force:
+        conn.close()
+        print(
+            "The PostgreSQL warehouse already contains real data and does not look like a demo.\n"
+            "Refusing to overwrite real data. Use a separate GARMIN_MCP_DATABASE_URL\n"
+            "for demo data,\n"
+            "or pass --force if you are certain.",
+            file=sys.stderr,
+        )
+        return 2
+    if has_data:
+        with conn.transaction():
+            for table in (
+                "daily_wellness", "sleep", "hrv", "activities", "training_status",
+                "raw_snapshots", "sync_state", "demo_info",
+            ):
+                conn.execute(f"DELETE FROM {table}")
     try:
         report = demo.generate(conn, days=args.days, end=args.end, seed=args.seed)
     except ValueError as e:
@@ -166,7 +185,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         conn.close()
 
     total = sum(report["rows"].values())
-    print(f"Generated a demo store at {config.db_path}")
+    print("Generated a demo store in the configured PostgreSQL warehouse")
     print(f"  {report['days']} days, {report['start']} .. {report['end']}, {total} rows")
     for table, count in report["rows"].items():
         print(f"    {table:16} {count:5}")
@@ -184,8 +203,11 @@ def cmd_reparse(args: argparse.Namespace) -> int:
 
     config = args.config
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
-    report = sync.reparse(config, conn)
+    conn = db.connect(config.database_url)
+    try:
+        report = sync.reparse(config, conn)
+    finally:
+        conn.close()
     if report["unknown_endpoints"]:
         print(f"skipped {report['unknown_endpoints']} snapshots from unknown endpoints")
     return 0

@@ -26,8 +26,8 @@ def decoded(monkeypatch):
     return payload
 
 
-def test_import_bundle(tmp_path, decoded):
-    conn = db.connect(tmp_path / "t.db")
+def test_import_bundle(tmp_path, decoded, postgres_connection):
+    conn = postgres_connection
     report = importer.import_bundle(conn, tmp_path)
     assert report["date"] == "2026-06-24"
     assert set(report["imported"]) == {"sleep", "hrv", "daily_wellness"}
@@ -41,20 +41,20 @@ def test_import_bundle(tmp_path, decoded):
     assert sleep["score"] == 84
 
 
-def test_api_rows_not_overwritten(tmp_path, decoded):
-    conn = db.connect(tmp_path / "t.db")
+def test_api_rows_not_overwritten(tmp_path, decoded, postgres_connection):
+    conn = postgres_connection
     db.upsert(conn, "sleep", {"date": "2026-06-24", "score": 99, "source": "api"}, ("date",))
     report = importer.import_bundle(conn, tmp_path)
     assert any(s.startswith("sleep") for s in report["skipped"])
-    assert conn.execute("SELECT score FROM sleep").fetchone()[0] == 99
+    assert conn.execute("SELECT score FROM sleep").fetchone()["score"] == 99
 
     report = importer.import_bundle(conn, tmp_path, force=True)
     assert "sleep" in report["imported"]
-    assert conn.execute("SELECT score FROM sleep").fetchone()[0] == 84
+    assert conn.execute("SELECT score FROM sleep").fetchone()["score"] == 84
 
 
-def test_missing_date_raises(tmp_path, monkeypatch):
+def test_missing_date_raises(tmp_path, monkeypatch, postgres_connection):
     monkeypatch.setattr(importer, "decode_bundle", lambda folder: {"date": None})
-    conn = db.connect(tmp_path / "t.db")
+    conn = postgres_connection
     with pytest.raises(ValueError, match="date"):
         importer.import_bundle(conn, tmp_path)

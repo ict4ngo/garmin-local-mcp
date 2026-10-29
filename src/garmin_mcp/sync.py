@@ -8,12 +8,13 @@ rebuilds the whole database from raw snapshots without any network access.
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from collections.abc import Callable
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from psycopg import Connection
 
 from . import db, raw
 from .auth import AuthError
@@ -89,7 +90,7 @@ def _fetch_with_backoff(endpoint: Endpoint, client, day: str, progress: Progress
 
 def _store(
     config: Config,
-    conn: sqlite3.Connection,
+    conn: Connection,
     endpoint: Endpoint,
     day: str,
     payload,
@@ -121,7 +122,7 @@ def _store(
 
 def sync_range(
     config: Config,
-    conn: sqlite3.Connection,
+    conn: Connection,
     client,
     start: str,
     end: str,
@@ -197,7 +198,7 @@ def sync_range(
     return report
 
 
-def reparse(config: Config, conn: sqlite3.Connection, progress: Progress = print) -> dict:
+def reparse(config: Config, conn: Connection, progress: Progress = print) -> dict:
     """Rebuild database tables from raw snapshots on disk. Fully offline.
 
     Re-runs every parse function, re-registers snapshots in raw_snapshots, and

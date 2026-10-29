@@ -8,14 +8,15 @@ overwritten unless the caller forces it.
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
+
+from psycopg import Connection
 
 from .db import upsert
 from .fitdecode import decode_bundle, to_rows
 
 
-def import_bundle(conn: sqlite3.Connection, folder: Path, force: bool = False) -> dict:
+def import_bundle(conn: Connection, folder: Path, force: bool = False) -> dict:
     """Decode one export bundle and upsert its rows. Returns an import report."""
     decoded = decode_bundle(Path(folder))
     date = decoded.get("date")
@@ -31,7 +32,7 @@ def import_bundle(conn: sqlite3.Connection, folder: Path, force: bool = False) -
         if row is None or all(v is None for k, v in row.items() if k not in ("date", "source")):
             continue
         existing = conn.execute(
-            f"SELECT source FROM {table} WHERE date=?", (date,)  # noqa: S608 - fixed table names
+            f"SELECT source FROM {table} WHERE date=%s", (date,)  # noqa: S608 - fixed table names
         ).fetchone()
         if existing and existing["source"] == "api" and not force:
             report["skipped"].append(f"{table} (api row exists; use force to overwrite)")

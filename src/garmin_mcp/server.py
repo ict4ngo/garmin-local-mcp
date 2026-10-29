@@ -12,7 +12,6 @@ works fully offline over already-synced history.
 from __future__ import annotations
 
 import functools
-import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from datetime import date as date_type
@@ -20,6 +19,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from psycopg import Connection
 
 from . import analysis, auth, config, db, demo, importer
 from . import sync as sync_engine
@@ -43,10 +43,10 @@ def _cfg() -> Config:
     return _config
 
 
-def _connect(cfg: Config) -> sqlite3.Connection:
-    # One short-lived connection per call: sqlite connections are cheap and
+def _connect(cfg: Config) -> Connection:
+    # One short-lived connection per call: database connections are cheap and
     # this avoids stale handles across a long-running server process.
-    return db.connect(cfg.db_path)
+    return db.connect(cfg.database_url)
 
 
 def _default_range(cfg: Config, start: str | None, end: str | None) -> tuple[str, str]:
@@ -128,18 +128,24 @@ def sync_status() -> dict:
     with closing(_connect(cfg)) as conn:
         coverage = {}
         for table in _TABLES:
-            first, last, count = conn.execute(
-                f"SELECT MIN(date), MAX(date), COUNT(*) FROM {table}"  # noqa: S608
+            row = conn.execute(
+                f"SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS count FROM {table}"  # noqa: S608
             ).fetchone()
-            coverage[table] = {"rows": count, "first": first, "last": last}
-        last_sync = conn.execute("SELECT MAX(updated_at) FROM sync_state").fetchone()[0]
+            coverage[table] = {
+                "rows": row["count"],
+                "first": row["first"],
+                "last": row["last"],
+            }
+        last_sync = conn.execute(
+            "SELECT MAX(updated_at) AS last_sync FROM sync_state"
+        ).fetchone()["last_sync"]
         errors = conn.execute(
             "SELECT endpoint, date, last_error FROM sync_state "
             "WHERE status='error' ORDER BY date DESC, endpoint LIMIT 10"
         ).fetchall()
         n_errors = conn.execute(
-            "SELECT COUNT(*) FROM sync_state WHERE status='error'"
-        ).fetchone()[0]
+            "SELECT COUNT(*) AS count FROM sync_state WHERE status='error'"
+        ).fetchone()["count"]
         # Surfaced so an assistant never reports generated numbers as real
         # measurements. Absent for normal stores.
         generated = demo.is_demo(conn)
@@ -276,7 +282,7 @@ def get_activity(activity_id: int) -> dict:
     """
     with closing(_connect(_cfg())) as conn:
         row = conn.execute(
-            "SELECT * FROM activities WHERE activity_id=?", (activity_id,)
+            "SELECT * FROM activities WHERE activity_id=%s", (activity_id,)
         ).fetchone()
     if row is None:
         return {"error": f"No activity with id {activity_id}"}
@@ -294,7 +300,7 @@ def gaps(start: str | None = None, end: str | None = None) -> dict:
     cfg = _cfg()
     with closing(_connect(cfg)) as conn:
         if start is None:
-            start = conn.execute("SELECT MIN(date) FROM sync_state").fetchone()[0]
+            start = conn.execute("SELECT MIN(date) AS first FROM sync_state").fetchone()["first"]
             if start is None:
                 raise ValueError("No synced data yet - run the sync tool or CLI first")
         end = end or sync_engine.yesterday(cfg)

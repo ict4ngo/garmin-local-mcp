@@ -60,9 +60,10 @@ class RateLimitedClient(FakeClient):
 
 
 @pytest.fixture
-def config(tmp_path):
+def config(tmp_path, postgres_connection, test_database_url):
     cfg = Config(
         data_dir=tmp_path,
+        database_url=test_database_url,
         timezone="America/New_York",
         units="metric",
         request_delay_seconds=0.0,
@@ -90,27 +91,28 @@ def dump_db(conn):
             tuple((k, r[k]) for k in r.keys() if k != "fetched_at") for r in rows
         )
     out["sync_state"] = sorted(
-        tuple(r) for r in conn.execute("SELECT endpoint, date, status FROM sync_state")
+        tuple(r.values()) for r in conn.execute("SELECT endpoint, date, status FROM sync_state")
     )
     out["raw_snapshots"] = sorted(
-        tuple(r)
+        tuple(r.values())
         for r in conn.execute("SELECT path, date, endpoint, bytes, sha256 FROM raw_snapshots")
     )
     return out
 
 
 def test_sync_range_rows_land(config):
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     client = FakeClient()
     report = run(config, conn, client)
 
-    wellness = conn.execute("SELECT * FROM daily_wellness WHERE date=?", (DAY1,)).fetchone()
+    wellness = conn.execute("SELECT * FROM daily_wellness WHERE date=%s", (DAY1,)).fetchone()
     assert wellness["resting_hr"] == 55
     assert wellness["skin_temp_dev_c"] == -0.3  # sleep's partial merged in, nothing clobbered
     assert wellness["source"] == "api"
-    assert conn.execute("SELECT score FROM sleep WHERE date=?", (DAY1,)).fetchone()[0] == 82
-    assert conn.execute("SELECT status FROM hrv WHERE date=?", (DAY1,)).fetchone()[0] == "balanced"
-    training = conn.execute("SELECT * FROM training_status WHERE date=?", (DAY1,)).fetchone()
+    assert conn.execute("SELECT score FROM sleep WHERE date=%s", (DAY1,)).fetchone()["score"] == 82
+    hrv = conn.execute("SELECT status FROM hrv WHERE date=%s", (DAY1,)).fetchone()
+    assert hrv["status"] == "balanced"
+    training = conn.execute("SELECT * FROM training_status WHERE date=%s", (DAY1,)).fetchone()
     assert training["status"] == "productive_1"  # from the training_status endpoint
     assert training["fitness_age"] == 41.23  # fitnessage's partial merged in, nothing clobbered
     assert training["achievable_fitness_age"] == 40.99
@@ -139,7 +141,7 @@ def test_sync_range_rows_land(config):
 
 
 def test_rerun_is_idempotent(config):
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     client = FakeClient()
     run(config, conn, client)
     calls = len(client.calls)
@@ -154,7 +156,7 @@ def test_rerun_is_idempotent(config):
     assert snapshot.read_bytes() == content
 
     # even with sync_state cleared, existing snapshots are never overwritten
-    with conn:
+    with conn.transaction():
         conn.execute("DELETE FROM sync_state")
     run(config, conn, client)
     assert snapshot.read_bytes() == content
@@ -163,7 +165,7 @@ def test_rerun_is_idempotent(config):
 def test_rate_limit_backs_off_then_aborts(config, monkeypatch):
     sleeps = []
     monkeypatch.setattr(sync, "_sleep", sleeps.append)
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     report = run(config, conn, RateLimitedClient())
 
     assert sleeps == [30, 120, 600]
@@ -171,12 +173,12 @@ def test_rate_limit_backs_off_then_aborts(config, monkeypatch):
     assert report["resumable"] is True
     assert report["requests"] == 0
     row = conn.execute(
-        "SELECT status, last_error FROM sync_state WHERE endpoint='usersummary' AND date=?",
+        "SELECT status, last_error FROM sync_state WHERE endpoint='usersummary' AND date=%s",
         (DAY1,),
     ).fetchone()
     assert row["status"] == "error" and "rate limited" in row["last_error"]
     # aborted before any other endpoint was attempted
-    assert conn.execute("SELECT COUNT(*) FROM sync_state").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) AS count FROM sync_state").fetchone()["count"] == 1
 
 
 def test_auth_error_aborts_with_hint(config):
@@ -184,7 +186,7 @@ def test_auth_error_aborts_with_hint(config):
         def get_stats(self, date):
             raise AuthError("Stored tokens were rejected")
 
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     report = run(config, conn, AuthFailClient())
     assert report["aborted"] == "auth"
     assert report["resumable"] is True
@@ -196,26 +198,26 @@ def test_endpoint_error_continues(config):
         def get_sleep_data(self, date):
             raise RuntimeError("boom")
 
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     report = run(config, conn, FlakyClient())
     assert report["aborted"] is None
     assert report["endpoints"]["sleep"] == {"ok": 0, "empty": 0, "skipped": 0, "error": 2}
     assert report["endpoints"]["hrv"]["ok"] == 1  # later endpoints still ran
     row = conn.execute(
-        "SELECT last_error FROM sync_state WHERE endpoint='sleep' AND date=?", (DAY1,)
+        "SELECT last_error FROM sync_state WHERE endpoint='sleep' AND date=%s", (DAY1,)
     ).fetchone()
     assert "boom" in row["last_error"]
 
 
 def test_partial_upsert_survives_either_order(config):
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     client = FakeClient()
     run(config, conn, client, endpoints=["sleep"])
-    row = conn.execute("SELECT * FROM daily_wellness WHERE date=?", (DAY1,)).fetchone()
+    row = conn.execute("SELECT * FROM daily_wellness WHERE date=%s", (DAY1,)).fetchone()
     assert row["skin_temp_dev_c"] == -0.3 and row["resting_hr"] is None
 
     run(config, conn, client, endpoints=["usersummary"])
-    row = conn.execute("SELECT * FROM daily_wellness WHERE date=?", (DAY1,)).fetchone()
+    row = conn.execute("SELECT * FROM daily_wellness WHERE date=%s", (DAY1,)).fetchone()
     assert row["skin_temp_dev_c"] == -0.3  # untouched by the later usersummary upsert
     assert row["resting_hr"] == 55
 
@@ -225,26 +227,27 @@ def test_throttle_between_requests(config, monkeypatch):
     monkeypatch.setattr(sync, "_sleep", sleeps.append)
     delayed = Config(
         data_dir=config.data_dir,
+        database_url=config.database_url,
         timezone=config.timezone,
         units=config.units,
         request_delay_seconds=1.5,
         baseline_window_days=28,
     )
-    conn = db.connect(delayed.db_path)
+    conn = db.connect(delayed.database_url)
     run(delayed, conn, FakeClient())
     assert sleeps == [1.5] * 11  # between requests only, not before the first
 
 
 def test_reparse_rebuilds_identical_db(config):
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     run(config, conn, FakeClient())
     expected = dump_db(conn)
     conn.close()
 
-    for suffix in ("", "-wal", "-shm"):
-        Path(f"{config.db_path}{suffix}").unlink(missing_ok=True)
-
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
+    with conn.transaction():
+        for table in (*DATA_TABLES, "sync_state", "raw_snapshots"):
+            conn.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed test table names
     report = sync.reparse(config, conn, progress=quiet)
     assert report["daily_snapshots"] == 12
     assert report["activity_snapshots"] == 1
@@ -259,6 +262,6 @@ def test_yesterday_and_default_range(config):
 
 
 def test_unknown_endpoint_rejected(config):
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     with pytest.raises(ValueError, match="Unknown endpoints"):
         run(config, conn, FakeClient(), endpoints=["body_battery"])

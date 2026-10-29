@@ -29,6 +29,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
+    "psycopg[binary]>=3.2,<4",
     # mcp 2.0.0 (2026-07-28) is a major rework that removed mcp.server.fastmcp;
     # stay on 1.x until the server is ported to the v2 API.
     "mcp>=1.0,<2",

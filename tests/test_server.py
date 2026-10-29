@@ -8,6 +8,7 @@ the server's cached config is reset per test. No network anywhere.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, timedelta
 
 import pytest
@@ -23,14 +24,15 @@ EXPECTED_TOOLS = {
 
 
 @pytest.fixture
-def data_dir(tmp_path, monkeypatch):
+def data_dir(tmp_path, monkeypatch, postgres_connection, test_database_url):
     monkeypatch.setenv("GARMIN_MCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", test_database_url)
     monkeypatch.setattr(server, "_config", None)  # drop any cached config
     return tmp_path
 
 
 def seed_month(data_dir) -> None:
-    conn = db.connect(data_dir / "garmin.db")
+    conn = db.connect(os.environ["GARMIN_MCP_DATABASE_URL"])
     for i in range(30):
         d = (BASE + timedelta(days=i)).isoformat()
         db.upsert(

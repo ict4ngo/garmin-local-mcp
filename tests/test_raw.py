@@ -1,8 +1,8 @@
-from garmin_mcp import db, raw
+from garmin_mcp import raw
 
 
-def test_write_and_skip(tmp_path):
-    conn = db.connect(tmp_path / "t.db")
+def test_write_and_skip(tmp_path, postgres_connection):
+    conn = postgres_connection
     raw_dir = tmp_path / "raw"
     p = raw.daily_path(raw_dir, "2026-07-02", "sleep")
     assert p == raw_dir / "daily" / "2026" / "2026-07-02" / "sleep.json"
@@ -20,8 +20,8 @@ def test_write_and_skip(tmp_path):
     assert row["bytes"] > 0
 
 
-def test_iter_daily_snapshots(tmp_path):
-    conn = db.connect(tmp_path / "t.db")
+def test_iter_daily_snapshots(tmp_path, postgres_connection):
+    conn = postgres_connection
     raw_dir = tmp_path / "raw"
     for date, ep in [("2026-07-02", "sleep"), ("2026-07-01", "hrv"), ("2026-07-01", "sleep")]:
         raw.write_snapshot(conn, raw_dir, raw.daily_path(raw_dir, date, ep), {}, date, ep)

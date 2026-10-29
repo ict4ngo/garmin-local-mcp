@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+
+from psycopg import Connection
 
 from .db import upsert, utcnow
 
@@ -28,7 +29,7 @@ def activity_path(raw_dir: Path, activity_id: int) -> Path:
 
 
 def write_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     raw_dir: Path,
     path: Path,
     payload: object,
@@ -46,7 +47,7 @@ def write_snapshot(
 
 
 def index_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     raw_dir: Path,
     path: Path,
     date: str | None,
