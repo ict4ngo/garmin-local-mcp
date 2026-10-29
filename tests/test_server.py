@@ -18,7 +18,8 @@ from garmin_mcp import db, server
 BASE = date(2026, 6, 1)
 
 EXPECTED_TOOLS = {
-    "auth_status", "sync", "sync_status", "get_day", "query_metrics", "correlate",
+    "auth_status", "sync", "sync_status", "get_day", "query_metrics", "query_samples",
+    "compare_time_windows", "correlate",
     "baselines", "anomalies", "list_activities", "get_activity", "gaps", "import_fit",
 }
 
@@ -46,7 +47,7 @@ def seed_month(data_dir) -> None:
     conn.close()
 
 
-def test_all_twelve_tools_registered():
+def test_all_fourteen_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
 

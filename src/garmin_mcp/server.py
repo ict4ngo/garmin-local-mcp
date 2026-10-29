@@ -15,13 +15,13 @@ import functools
 from collections.abc import Callable
 from contextlib import closing
 from datetime import date as date_type
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from psycopg import Connection
 
-from . import analysis, auth, config, db, demo, importer
+from . import analysis, auth, config, db, demo, importer, timeseries
 from . import sync as sync_engine
 from .config import Config
 
@@ -178,6 +178,55 @@ def get_day(date: str) -> dict:
     """
     with closing(_connect(_cfg())) as conn:
         return analysis.get_day(conn, date)
+
+
+@mcp.tool()
+@_tool_errors
+def query_samples(
+    metrics: list[str],
+    start: str,
+    end: str,
+    timezone: str,
+    limit: int = 1000,
+    offset: int = 0,
+) -> dict:
+    """Return bounded raw timestamped samples in an ISO datetime range.
+
+    Bounds may include a UTC offset; naive values are interpreted in the given
+    IANA timezone. The start is inclusive and end is exclusive.
+    """
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("start and end must be valid ISO datetimes") from exc
+    with closing(_connect(_cfg())) as conn:
+        return timeseries.query_samples(conn, metrics, start_dt, end_dt, timezone, limit, offset)
+
+
+@mcp.tool()
+@_tool_errors
+def compare_time_windows(
+    metric: str,
+    start_date: str,
+    end_date: str,
+    windows: list[timeseries.TimeWindow],
+    timezone: str,
+) -> dict:
+    """Compare a sample metric across named local-clock windows and dates.
+
+    Each date is weighted once using its window mean, regardless of how many
+    samples Garmin recorded that day. End dates are inclusive.
+    """
+    try:
+        start_day = date_type.fromisoformat(start_date)
+        end_day = date_type.fromisoformat(end_date)
+    except ValueError as exc:
+        raise ValueError("start_date and end_date must use YYYY-MM-DD") from exc
+    with closing(_connect(_cfg())) as conn:
+        return timeseries.compare_time_windows(
+            conn, metric, start_day, end_day, windows, timezone
+        )
 
 
 @mcp.tool()
