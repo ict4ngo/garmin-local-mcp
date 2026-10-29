@@ -76,7 +76,7 @@ def write_snapshot(
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, indent=1, sort_keys=True).encode("utf-8")
-    path.write_bytes(data)
+    _atomic_write(path, data)
     index_snapshot(conn, raw_dir, path, date, endpoint)
     return True
 
@@ -102,9 +102,26 @@ def write_versioned_snapshot(
     )
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        _atomic_write(path, data)
     index_snapshot(conn, raw_dir, path, date, endpoint, fetched_at=fetched_at)
     return path
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Publish complete snapshot bytes atomically in the destination directory."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".snapshot-", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def index_snapshot(

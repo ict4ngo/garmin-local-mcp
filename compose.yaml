@@ -1,3 +1,9 @@
+x-app-environment: &app-environment
+  GARMIN_MCP_DATABASE_URL: postgresql://garmin:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/garmin
+  GARMIN_MCP_DATA_DIR: /data
+  GARMIN_MCP_TIMEZONE: ${GARMIN_MCP_TIMEZONE:?Set GARMIN_MCP_TIMEZONE in .env}
+  GARMIN_MCP_SYNC_TIMES: ${GARMIN_MCP_SYNC_TIMES:-06:00,18:00}
+
 services:
   postgres:
     image: postgres:17
@@ -19,14 +25,11 @@ services:
     build: .
     restart: unless-stopped
     command: ["serve-http", "--host", "0.0.0.0", "--port", "8000"]
-    environment: &app-environment
-      GARMIN_MCP_DATABASE_URL: postgresql://garmin:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/garmin
-      GARMIN_MCP_DATA_DIR: /data
+    environment:
+      <<: *app-environment
       GARMIN_MCP_HTTP_BEARER_TOKEN: ${GARMIN_MCP_HTTP_BEARER_TOKEN:?Set GARMIN_MCP_HTTP_BEARER_TOKEN in .env}
-      GARMIN_MCP_TIMEZONE: ${GARMIN_MCP_TIMEZONE:?Set GARMIN_MCP_TIMEZONE in .env}
-      GARMIN_MCP_SYNC_TIMES: ${GARMIN_MCP_SYNC_TIMES:-06:00,18:00}
     ports:
-      - "8000:8000"
+      - "${GARMIN_MCP_LAN_IP:-127.0.0.1}:${GARMIN_MCP_HTTP_PORT:-8000}:8000"
     volumes:
       - garmin_data:/data
     depends_on:

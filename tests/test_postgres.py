@@ -25,6 +25,7 @@ def test_schema_created(postgres_connection):
         "training_status",
         "raw_snapshots",
         "sync_state",
+        "sqlite_import_marker",
     } <= tables
     version = conn.execute("SELECT MAX(version) AS version FROM schema_version").fetchone()
     assert version["version"] == db.SCHEMA_VERSION

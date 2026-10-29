@@ -170,11 +170,13 @@ def cmd_migrate_sqlite(args: argparse.Namespace) -> int:
     from .sqlite_import import migrate_sqlite
 
     try:
-        report = migrate_sqlite(args.source, args.config.database_url)
+        report = migrate_sqlite(
+            args.source, args.config.database_url, source_stopped=args.source_stopped
+        )
     except Exception:
         print(
-            "SQLite migration failed. Verify the source file and PostgreSQL connection settings; "
-            "error details are omitted to protect credentials.",
+            "SQLite migration failed. Verify the source file, stop all SQLite writers, "
+            "and check PostgreSQL settings; error details are omitted to protect credentials.",
             file=sys.stderr,
         )
         return 1
@@ -189,12 +191,14 @@ def cmd_demo(args: argparse.Namespace) -> int:
     config.ensure_dirs()
     conn = db.connect(config.database_url)
     generated = demo.is_demo(conn)
+    protected_tables = (
+        "daily_wellness", "sleep", "hrv", "activities", "training_status",
+        "raw_snapshots", "sync_state", "samples", "activity_detail_state",
+        "backfill_state", "worker_state",
+    )
     has_data = any(
         conn.execute(f"SELECT EXISTS (SELECT 1 FROM {table}) AS present").fetchone()["present"]
-        for table in (
-            "daily_wellness", "sleep", "hrv", "activities", "training_status",
-            "raw_snapshots", "sync_state",
-        )
+        for table in protected_tables
     )
     if has_data and not generated and not args.force:
         conn.close()
@@ -210,7 +214,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
         with conn.transaction():
             for table in (
                 "daily_wellness", "sleep", "hrv", "activities", "training_status",
-                "raw_snapshots", "sync_state", "demo_info",
+                "raw_snapshots", "sync_state", "samples", "activity_detail_state",
+                "backfill_state", "worker_state", "demo_info",
             ):
                 conn.execute(f"DELETE FROM {table}")
     try:
@@ -304,6 +309,12 @@ def build_parser() -> argparse.ArgumentParser:
         "migrate-sqlite", help="Copy a legacy SQLite database into the PostgreSQL warehouse"
     )
     p.add_argument("--from", dest="source", required=True, metavar="PATH")
+    p.add_argument(
+        "--source-stopped",
+        action="store_true",
+        required=True,
+        help="Confirm every process writing the legacy SQLite warehouse has been stopped",
+    )
     p.set_defaults(func=cmd_migrate_sqlite)
 
     from .demo import DEMO_DAYS, DEMO_SEED

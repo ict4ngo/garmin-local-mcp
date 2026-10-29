@@ -1,3 +1,8 @@
+import hashlib
+import json
+
+import pytest
+
 from garmin_mcp import raw
 
 
@@ -72,6 +77,35 @@ def test_latest_snapshot_orders_fractional_timestamps(tmp_path, postgres_connect
 
     [(day, endpoint, path)] = raw.latest_daily_snapshots(raw_dir)
     assert (day, endpoint, raw.read_snapshot(path)) == ("2026-07-02", "stress", {"value": 3})
+
+
+def test_failed_atomic_snapshot_replace_never_exposes_partial_destination(
+    tmp_path, postgres_connection, monkeypatch
+):
+    conn = postgres_connection
+    raw_dir = tmp_path / "raw"
+    payload = {"value": "complete snapshot"}
+    fetched_at = "2026-07-02T12:00:00.000001Z"
+    data = json.dumps(payload, indent=1, sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(data).hexdigest()
+    destination = raw.versioned_daily_path(
+        raw_dir, "2026-07-02", "stress", fetched_at, digest
+    )
+
+    def fail_replace(source, target):
+        raise OSError("simulated atomic replace failure")
+
+    monkeypatch.setattr(raw.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated"):
+        raw.write_versioned_snapshot(
+            conn, raw_dir, payload, "2026-07-02", "stress", fetched_at
+        )
+
+    assert not destination.exists()
+    assert not list(destination.parent.glob("*.json"))
+    assert conn.execute(
+        "SELECT COUNT(*) AS count FROM raw_snapshots WHERE endpoint='stress'"
+    ).fetchone()["count"] == 0
 
 
 def test_iter_fit_archives_ignores_symlinks(tmp_path):

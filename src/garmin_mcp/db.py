@@ -169,6 +169,14 @@ MIGRATIONS: dict[int, str] = {
       updated_at TEXT NOT NULL
     );
     """,
+    6: """
+    CREATE TABLE sqlite_import_marker (
+      singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+      source_fingerprint TEXT NOT NULL UNIQUE,
+      imported_at TIMESTAMPTZ NOT NULL,
+      report JSONB NOT NULL
+    );
+    """,
 }
 
 SCHEMA_VERSION = max(MIGRATIONS)

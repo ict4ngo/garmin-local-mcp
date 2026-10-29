@@ -8,13 +8,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def compose_config(tmp_path: Path, schedule: str = "06:00,18:00") -> dict:
+def compose_config(
+    tmp_path: Path,
+    schedule: str = "06:00,18:00",
+    *,
+    lan_ip: str | None = None,
+    http_port: int | None = None,
+) -> dict:
     env_file = tmp_path / ".env"
     env_file.write_text(
         "POSTGRES_PASSWORD=deployment-test-db-password-0123456789abcdef\n"
         "GARMIN_MCP_HTTP_BEARER_TOKEN=deployment-test-token-0123456789abcdef\n"
         "GARMIN_MCP_TIMEZONE=America/Denver\n"
         f"GARMIN_MCP_SYNC_TIMES={schedule}\n"
+        + (f"GARMIN_MCP_LAN_IP={lan_ip}\n" if lan_ip is not None else "")
+        + (f"GARMIN_MCP_HTTP_PORT={http_port}\n" if http_port is not None else "")
     )
     environment = os.environ.copy()
     for key in (
@@ -22,6 +30,8 @@ def compose_config(tmp_path: Path, schedule: str = "06:00,18:00") -> dict:
         "GARMIN_MCP_HTTP_BEARER_TOKEN",
         "GARMIN_MCP_TIMEZONE",
         "GARMIN_MCP_SYNC_TIMES",
+        "GARMIN_MCP_LAN_IP",
+        "GARMIN_MCP_HTTP_PORT",
     ):
         environment.pop(key, None)
     result = subprocess.run(
@@ -73,6 +83,7 @@ def test_compose_publishes_authenticated_mcp_only(tmp_path):
     assert service_name == "mcp"
     assert str(port["published"]) == "8000"
     assert str(port["target"]) == "8000"
+    assert port["host_ip"] == "127.0.0.1"
     assert services["mcp"]["command"] == [
         "serve-http",
         "--host",
@@ -81,6 +92,7 @@ def test_compose_publishes_authenticated_mcp_only(tmp_path):
         "8000",
     ]
     assert services["mcp"]["environment"]["GARMIN_MCP_HTTP_BEARER_TOKEN"]
+    assert "GARMIN_MCP_HTTP_BEARER_TOKEN" not in services["sync-worker"]["environment"]
 
 
 def test_compose_shares_raw_volume_with_worker(tmp_path):
@@ -111,3 +123,13 @@ def test_compose_schedule_override_reaches_worker(tmp_path):
     assert first["services"]["sync-worker"].get("build") == second["services"][
         "sync-worker"
     ].get("build")
+
+
+def test_compose_lan_bind_and_port_are_configurable(tmp_path):
+    config = compose_config(tmp_path, lan_ip="192.168.1.42", http_port=8123)
+    [port] = config["services"]["mcp"]["ports"]
+
+    assert port["host_ip"] == "192.168.1.42"
+    assert str(port["published"]) == "8123"
+    assert str(port["target"]) == "8000"
+    assert not config["services"]["postgres"].get("ports")

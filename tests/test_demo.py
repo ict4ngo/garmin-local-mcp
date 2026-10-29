@@ -131,3 +131,44 @@ def test_cli_regenerates_an_existing_demo_store(tmp_path, postgres_connection):
         "SELECT COUNT(*) AS count FROM daily_wellness"
     ).fetchone()["count"]
     assert count == 40
+
+
+def test_cli_refuses_sample_only_real_store(tmp_path, capsys, postgres_connection):
+    postgres_connection.execute(
+        "INSERT INTO samples VALUES ('stress','2026-08-01','stress',NOW(),"
+        "'2026-08-01',0,42,'score',NULL,NOW())"
+    )
+
+    assert main(["--data-dir", str(tmp_path), "demo"]) == 2
+    assert "Refusing to overwrite real data" in capsys.readouterr().err
+    assert postgres_connection.execute("SELECT COUNT(*) AS count FROM samples").fetchone()[
+        "count"
+    ] == 1
+
+
+def test_demo_force_clears_sample_and_worker_state_but_keeps_migration_marker(
+    tmp_path, postgres_connection
+):
+    conn = postgres_connection
+    conn.execute(
+        "INSERT INTO samples VALUES ('stress','real','stress',NOW(),'2026-08-01',"
+        "0,42,'score',NULL,NOW())"
+    )
+    conn.execute("INSERT INTO activity_detail_state VALUES (1,'digest','path',NOW())")
+    conn.execute(
+        "INSERT INTO backfill_state VALUES ('stress',NULL,NULL,0,'pending',NULL,NOW()::text)"
+    )
+    conn.execute("INSERT INTO worker_state VALUES ('last_sync','now',NOW()::text)")
+    conn.execute(
+        "INSERT INTO sqlite_import_marker "
+        "(singleton, source_fingerprint, imported_at, report) "
+        "VALUES (TRUE, 'fingerprint', NOW(), '{}'::jsonb)"
+    )
+
+    assert main(["--data-dir", str(tmp_path), "demo", "--force", "--days", "30"]) == 0
+
+    for table in ("samples", "activity_detail_state", "backfill_state", "worker_state"):
+        assert conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"] == 0
+    assert conn.execute("SELECT COUNT(*) AS count FROM sqlite_import_marker").fetchone()[
+        "count"
+    ] == 1

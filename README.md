@@ -31,7 +31,7 @@ This project inverts the architecture:
   wellness FIT messages (sleep score, HRV, skin temperature, sleep stages,
   naps) ingests manually exported bundles with no login at all. No other
   Garmin MCP ships this.
-- **Curated tools.** 12 composable tools, not 110.
+- **Curated tools.** 14 composable tools, not 110.
 
 | | garmin-local-mcp | Typical API-wrapper Garmin MCPs |
 |---|---|---|
@@ -40,7 +40,7 @@ This project inverts the architecture:
 | Server-side analysis (trends, correlations, baselines, anomalies) | Yes | No (raw JSON pass-through) |
 | Response size discipline | Compact columnar tables, typically < 2 KB | Raw payloads, up to hundreds of KB |
 | Zero-auth ingest path | Yes (FIT bundle import) | No |
-| Tool count | 12 curated | Often 20 to 110+ |
+| Tool count | 14 curated | Often 20 to 110+ |
 
 ## Try it without a Garmin account
 
@@ -83,7 +83,9 @@ range. `demo` refuses to overwrite a database it did not generate.
 Docker Compose runs PostgreSQL 17, the authenticated Streamable HTTP MCP server,
 and the scheduled sync worker. Docker is the only host runtime dependency.
 PostgreSQL is not published to the host; only the MCP HTTP port is exposed on
-port 8000. The HTTP server requires a static Bearer token.
+host port 8000 by default. It binds to loopback by default, so remote clients
+cannot connect until `GARMIN_MCP_LAN_IP` is set to the host's private LAN
+interface address. The HTTP server requires a static Bearer token.
 
 ```sh
 cp .env.example .env
@@ -100,6 +102,11 @@ openssl rand -hex 32  # use a different result for GARMIN_MCP_HTTP_BEARER_TOKEN
 
 Set `GARMIN_MCP_TIMEZONE` to your IANA timezone (for example
 `America/Denver`). Protect the file with `chmod 600 .env` and do not commit it.
+`GARMIN_MCP_LAN_IP` defaults to `127.0.0.1`; set it to the Docker host's
+private LAN interface IP (for example `192.168.1.20`) to allow other trusted
+LAN machines to connect. `GARMIN_MCP_HTTP_PORT` defaults to `8000` and changes
+the published host port without changing the container port. The worker does
+not receive `GARMIN_MCP_HTTP_BEARER_TOKEN`; only the MCP service needs it.
 The Compose schedule default is `06:00,18:00`; edit `GARMIN_MCP_SYNC_TIMES` in
 `.env` to any comma-separated local `HH:MM` times. For example, setting it to
 `07:15,21:45` changes the worker schedule on the next container recreation; it
@@ -119,20 +126,42 @@ or to inspect status, use `docker compose run --rm mcp sync --from 2026-01-01`
 or `docker compose run --rm mcp status`. CLI commands use the same PostgreSQL
 settings and app-data volume as the services.
 
-To migrate an existing SQLite warehouse, place the legacy database in the
-shared data volume and run the installed migration command:
+To migrate an existing SQLite warehouse, stop **every process that writes the
+old SQLite warehouse** before copying anything. This includes old app/worker
+processes and any other local writers. Copy the main database and any
+WAL/SHM/journal sidecars (`-wal`, `-shm`, or `-journal`) together; preserve the
+sidecar suffixes. Keep PostgreSQL empty and stop this deployment's MCP and
+worker while migrating.
+Legacy databases may omit the optional `demo_info` table. The migration leaves
+SQLite files unchanged, records a durable source fingerprint/report, and a
+repeat with the same source fingerprint is a no-op. It refuses to run without
+`--source-stopped`, into a non-empty PostgreSQL warehouse, or after a different
+SQLite source has already been imported; it never upserts over newer rows.
 
 ```sh
 docker compose up -d postgres mcp
+docker compose stop mcp sync-worker
+docker compose up -d postgres
 docker compose cp ./garmin.db mcp:/data/legacy.db
-docker compose run --rm mcp migrate-sqlite --from /data/legacy.db
+for suffix in -wal -shm -journal; do
+  [ ! -e "./garmin.db$suffix" ] || docker compose cp "./garmin.db$suffix" "mcp:/data/legacy.db$suffix"
+done
+docker compose run --rm --no-deps mcp migrate-sqlite --from /data/legacy.db --source-stopped
 docker compose up -d
 ```
 
-The `postgres_data` volume holds only PostgreSQL's database files. The separate
-`garmin_data` volume, shared by MCP and worker, holds Garmin tokens, immutable
-raw API snapshots, and FIT bundles/files saved there. Back up both volumes;
-they contain sensitive health information. For a consistent backup, stop the
+Copy any associated legacy raw snapshot files into the `garmin_data` volume at
+the same relative paths referenced by the SQLite `raw_snapshots` rows before
+reparse/backup. The command imports only the indexed PostgreSQL rows; it does
+not remove or modify source files.
+
+The `postgres_data` volume holds only PostgreSQL's database files. The
+`garmin_data` volume is the separate persistent app-data volume shared by MCP
+and worker; it holds Garmin tokens, immutable raw API snapshots, and FIT
+bundles/files saved there. PostgreSQL is the
+rebuildable query index; raw snapshots and tokens remain in the separate
+app-data volume. Back up both volumes; they contain sensitive health
+information. For a consistent backup, stop the
 worker and MCP writer (leave PostgreSQL running), then dump PostgreSQL and
 archive the app-data volume:
 
@@ -161,10 +190,13 @@ Keep off-host encrypted copies of both backups. Do not use `docker compose down
 
 ### Remote HTTP clients
 
-The HTTP endpoint is `http://<docker-host>:8000/mcp`. Use the configured static
-Bearer token. **Plain HTTP does not encrypt credentials or health data**: keep
-this endpoint on a trusted LAN, restrict port 8000 with your firewall, and
-never expose it directly to the Internet. For remote access, put it behind a
+The HTTP endpoint is `http://<private-LAN-IP>:<GARMIN_MCP_HTTP_PORT>/mcp`.
+Set `GARMIN_MCP_LAN_IP` to the host's private LAN interface and optionally
+change `GARMIN_MCP_HTTP_PORT` in `.env`; recreate the MCP container after edits,
+without rebuilding the image. Use the configured static Bearer token. **Plain
+HTTP does not encrypt credentials or health data**: keep
+this endpoint on a trusted LAN, restrict the configured MCP host port with your
+firewall, and never expose it directly to the Internet. For remote access, put it behind a
 TLS-terminating reverse proxy (and keep the upstream network private); do not
 assume the bearer token is a substitute for HTTPS.
 
@@ -229,7 +261,8 @@ garmin-local-mcp login
 
 **2. Backfill your history.** The sync is resumable, safe to interrupt, and
 throttled to be polite to Garmin's servers. A year of history is roughly 1,800
-requests; for long backfills, start it and let it run (overnight works well).
+requests; the default delay between requests is 2.0 seconds. For long backfills,
+start it and let it run (overnight works well).
 If it gets rate limited or interrupted, re-run the same command and it resumes
 where it left off.
 
@@ -316,7 +349,7 @@ Note: `login` and the initial backfill `sync` are CLI steps (see
 [Quickstart](#quickstart)); the MCP server itself never prompts for
 credentials.
 
-## The 12 tools
+## The 14 tools
 
 | Tool | What it does |
 |---|---|
@@ -325,6 +358,8 @@ credentials.
 | `sync_status` | Local data coverage per table, last sync time, and pending sync errors. |
 | `get_day` | One merged view of a single day: wellness, sleep, HRV, training status, activities, and data-quality flags. |
 | `query_metrics` | Columnar time series for one or more metrics between two dates, with daily/weekly/monthly aggregation and optional stats. |
+| `query_samples` | Bounded native timestamped samples for selected metrics and a half-open ISO datetime range; returns source timestamps/units without resampling. |
+| `compare_time_windows` | Compare caller-defined local-clock windows by per-day means across an inclusive date range, with counts and missing-coverage details. |
 | `correlate` | Pearson/Spearman correlation between two metrics, with day-lag support and an optional scan over lags -7..+7. |
 | `baselines` | Personal mean +/- sd band per metric over a trailing window (default 28 days), to judge what is normal for this user. |
 | `anomalies` | Outlier days (z-score deviations) and sustained streaks (5+ consecutive days on one side of the mean). |
@@ -333,9 +368,13 @@ credentials.
 | `gaps` | Missing days per table plus unresolved sync errors, to find holes worth re-syncing before drawing conclusions. |
 | `import_fit` | Zero-auth offline ingest of a manually exported Garmin wellness FIT bundle. |
 
-Only `sync` and `import_fit` write anything, and only inside the data
-directory. The server never prompts: auth problems come back as structured
-errors with a hint pointing at the login CLI.
+`sync` and `import_fit` write to the PostgreSQL warehouse and, when source
+payloads are fetched or imported, the raw/token app-data volume. The separate
+`sync-worker` also writes PostgreSQL and raw snapshots on its schedule without
+an MCP client being connected. Read/query tools do not write. The HTTP bearer
+token is provided only to the MCP service, never the worker. The server never
+prompts: auth problems come back as structured errors with a hint pointing at
+the login CLI.
 
 Available metric names include `resting_hr`, `sleep_score`, `hrv`, `steps`,
 `stress_avg`, `body_battery_high`, `skin_temp_dev_c`, `vo2max`, `fitness_age`,
@@ -441,9 +480,9 @@ Optional `config.toml` in the data directory:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `timezone` | system timezone | IANA name (e.g. `America/Denver`) used to compute "yesterday" for sync ranges |
+| `timezone` | none; required in the environment | IANA name (e.g. `America/Denver`) used for sync ranges and schedules; there is no system-timezone fallback |
 | `units` | `metric` | `metric` or `statute` |
-| `request_delay_seconds` | `1.0` | Delay between API requests during sync |
+| `request_delay_seconds` | `2.0` | Conservative delay between Garmin requests during backfill/sync |
 | `baseline_window_days` | `28` | Default trailing window for the `baselines` tool |
 
 Environment variables:
@@ -452,9 +491,12 @@ Environment variables:
 |---|---|
 | `GARMIN_MCP_DATA_DIR` | Override the data directory (default `~/.garmin-mcp`) |
 | `GARMIN_MCP_DATABASE_URL` | Required PostgreSQL connection URL; contains database credentials and must be kept secret |
-| `GARMIN_MCP_TIMEZONE` | Required IANA timezone for local dates and scheduling |
+| `GARMIN_MCP_TIMEZONE` | Required IANA timezone for local dates and scheduling; there is no system-timezone fallback |
 | `GARMIN_MCP_SYNC_TIMES` | Required comma-separated local `HH:MM` schedule for the worker (Compose default: `06:00,18:00`) |
 | `GARMIN_MCP_HTTP_BEARER_TOKEN` | Required static Bearer token for `serve-http`; not needed for stdio |
+| `GARMIN_MCP_LAN_IP` | Compose host bind address; defaults to `127.0.0.1`; set the host's private LAN IP for remote clients |
+| `GARMIN_MCP_HTTP_PORT` | Compose host port; defaults to `8000` and maps to container port 8000 |
+| `GARMIN_MCP_REQUEST_DELAY_SECONDS` | Delay between Garmin requests (default `2.0` seconds) |
 | `GARMINTOKENS` | Override the token store location (default `<data_dir>/tokens`) |
 | `GARMIN_EMAIL` / `GARMIN_PASSWORD` | Optional, for non-interactive re-login; when set, `garmin-local-mcp login` skips the prompts (MFA may still prompt if your account requires it) |
 

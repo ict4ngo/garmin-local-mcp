@@ -40,7 +40,8 @@ def postgres_connection(test_database_url, monkeypatch):
 
     conn = db.connect(test_database_url)
     conn.execute(
-        "TRUNCATE TABLE demo_info, worker_state, backfill_state, activity_detail_state, samples, "
+        "TRUNCATE TABLE sqlite_import_marker, demo_info, worker_state, backfill_state, "
+        "activity_detail_state, samples, "
         "raw_snapshots, sync_state, "
         "activities, training_status, "
         "hrv, sleep, daily_wellness RESTART IDENTITY CASCADE"
