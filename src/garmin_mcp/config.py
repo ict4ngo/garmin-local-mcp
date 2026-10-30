@@ -15,11 +15,17 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from datetime import date
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_DATA_DIR = Path.home() / ".garmin-mcp"
+_PRIVATE_UNICAST_NETWORKS = (
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("fc00::/7"),
+)
 
 
 def _resolve_path(raw: str | os.PathLike) -> Path | None:
@@ -148,6 +154,13 @@ def http_allowed_hosts() -> list[str]:
         parsed_ip = ip_address(raw_ip)
     except ValueError as exc:
         raise ValueError("GARMIN_MCP_LAN_IP must be an IPv4 or IPv6 address") from exc
+    if not parsed_ip.is_loopback and not any(
+        parsed_ip.version == network.version and parsed_ip in network
+        for network in _PRIVATE_UNICAST_NETWORKS
+    ):
+        raise ValueError(
+            "GARMIN_MCP_LAN_IP must be a loopback or private unicast address"
+        )
 
     raw_port = os.environ.get("GARMIN_MCP_HTTP_PORT", "8000").strip()
     try:

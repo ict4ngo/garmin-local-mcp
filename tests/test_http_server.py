@@ -190,3 +190,36 @@ def test_http_allowed_hosts_follow_compose_runtime_config(monkeypatch) -> None:
         "localhost:*",
         "[::1]:*",
     ]
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [
+        ("192.168.1.143", True),
+        ("10.0.0.2", True),
+        ("fc00::1", True),
+        ("127.0.0.1", True),
+        ("::1", True),
+        ("8.8.8.8", False),
+        ("2001:4860:4860::8888", False),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("224.0.0.1", False),
+        ("ff02::1", False),
+        ("240.0.0.1", False),
+        ("192.0.2.10", False),
+        ("169.254.1.1", False),
+        ("fe80::1", False),
+    ],
+)
+def test_config_rejects_public_or_unsafe_lan_ips(
+    monkeypatch, address: str, allowed: bool
+) -> None:
+    monkeypatch.setenv("GARMIN_MCP_LAN_IP", address)
+
+    if allowed:
+        result = config.http_allowed_hosts()
+        assert result[0].startswith(f"[{address}]:" if ":" in address else f"{address}:")
+    else:
+        with pytest.raises(ValueError, match="loopback or private unicast"):
+            config.http_allowed_hosts()

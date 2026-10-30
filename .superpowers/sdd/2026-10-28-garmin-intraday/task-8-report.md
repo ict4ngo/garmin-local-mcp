@@ -60,3 +60,45 @@
   skipped.
 
 Commit: `fix: allow configured LAN host for MCP HTTP` (hash reported at handoff).
+
+## Round 1: Restrict LAN bind addresses
+
+### Finding and change
+
+- Addressed the open finding: `GARMIN_MCP_LAN_IP` must now be a loopback
+  address, an RFC 1918 IPv4 private-unicast address, or an IPv6 ULA address.
+  This rejects global/public addresses, unspecified/wildcard addresses,
+  multicast, reserved/documentation ranges, and link-local addresses before
+  composing the HTTP Host allowlist. The exact configured Host+port allowlist,
+  loopback aliases, and enabled DNS-rebinding protection are unchanged.
+- The reviewer noted that `create_http_app` can accept arbitrary explicit
+  hostnames if called directly. This remains deferred: production calls it only
+  with the validated result of `config.http_allowed_hosts()`; no general
+  hostname/DNS validation was added.
+
+### TDD evidence
+
+- Added `test_config_rejects_public_or_unsafe_lan_ips` first, parameterized for
+  valid private IPv4/IPv6 and loopback addresses, and public, unspecified,
+  multicast, reserved/documentation, and link-local IPv4/IPv6 addresses.
+- RED: `uv run pytest tests/test_http_server.py::test_config_rejects_public_or_unsafe_lan_ips -q`
+  before implementation reported `10 failed, 5 passed`; unsafe values did not
+  raise `ValueError`.
+- GREEN after implementation: same command reported `15 passed, 1 warning`.
+
+### Round 1 validation outputs
+
+- Focused HTTP/deployment: `GARMIN_MCP_TEST_DATABASE_URL=<local test DB> uv run pytest tests/test_http_server.py tests/test_deployment.py -q`
+  - `29 passed, 1 warning in 1.05s`.
+- Full PostgreSQL suite: `GARMIN_MCP_TEST_DATABASE_URL=<local test DB> uv run pytest -q`
+  - `217 passed, 1 skipped, 1 warning in 34.02s`.
+- Ruff: `ruff check .` — `All checks passed!`
+- Lock: `uv lock --check` — `Resolved 48 packages in 0.71ms`.
+- Compose: `docker compose --env-file .env.example config --quiet` — passed
+  with no output.
+- Whitespace: `git diff --check` — passed with no output.
+- The temporary local PostgreSQL Docker container was removed after testing.
+  No homelab or user credentials were accessed.
+
+Round 1 commit: `fix: restrict MCP HTTP LAN bind addresses` (hash reported at
+handoff).
