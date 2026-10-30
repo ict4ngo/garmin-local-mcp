@@ -15,6 +15,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from datetime import date
+from ipaddress import ip_address
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -138,6 +139,26 @@ def http_bearer_token() -> str:
     if not value:
         raise ValueError("GARMIN_MCP_HTTP_BEARER_TOKEN is required for HTTP serving")
     return value
+
+
+def http_allowed_hosts() -> list[str]:
+    """Return the exact Compose-published host plus loopback aliases."""
+    raw_ip = os.environ.get("GARMIN_MCP_LAN_IP", "127.0.0.1").strip()
+    try:
+        parsed_ip = ip_address(raw_ip)
+    except ValueError as exc:
+        raise ValueError("GARMIN_MCP_LAN_IP must be an IPv4 or IPv6 address") from exc
+
+    raw_port = os.environ.get("GARMIN_MCP_HTTP_PORT", "8000").strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError("GARMIN_MCP_HTTP_PORT must be an integer from 1 to 65535") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("GARMIN_MCP_HTTP_PORT must be an integer from 1 to 65535")
+
+    host = f"[{parsed_ip}]:{port}" if parsed_ip.version == 6 else f"{parsed_ip}:{port}"
+    return [host, "127.0.0.1:*", "localhost:*", "[::1]:*"]
 
 
 def _schedule() -> tuple[str, ...]:

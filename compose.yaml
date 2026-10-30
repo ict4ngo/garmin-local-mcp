@@ -28,6 +28,8 @@ services:
     environment:
       <<: *app-environment
       GARMIN_MCP_HTTP_BEARER_TOKEN: ${GARMIN_MCP_HTTP_BEARER_TOKEN:?Set GARMIN_MCP_HTTP_BEARER_TOKEN in .env}
+      GARMIN_MCP_LAN_IP: ${GARMIN_MCP_LAN_IP:-127.0.0.1}
+      GARMIN_MCP_HTTP_PORT: ${GARMIN_MCP_HTTP_PORT:-8000}
     ports:
       - "${GARMIN_MCP_LAN_IP:-127.0.0.1}:${GARMIN_MCP_HTTP_PORT:-8000}:8000"
     volumes:

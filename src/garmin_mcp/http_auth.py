@@ -7,6 +7,7 @@ import hmac
 from collections.abc import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Mount
@@ -44,10 +45,25 @@ class BearerTokenMiddleware:
         await self.app(scope, receive, send)
 
 
-def create_http_app(mcp_server: FastMCP, expected_token: str) -> Starlette:
+def create_http_app(
+    mcp_server: FastMCP, expected_token: str, allowed_hosts: list[str]
+) -> Starlette:
     """Mount the MCP Streamable HTTP endpoint behind a static Bearer token."""
     if not expected_token:
         raise ValueError("expected_token must not be empty")
+    if not allowed_hosts or any(
+        "*" in host and (not host.endswith(":*") or "*" in host[:-2])
+        for host in allowed_hosts
+    ):
+        raise ValueError("allowed_hosts must contain explicit hosts, not a wildcard")
+
+    # FastMCP's HTTP app builds the transport middleware from settings here;
+    # configure it first so the exact published LAN host is included.
+    mcp_server.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=[f"http://{host}" for host in allowed_hosts],
+    )
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:

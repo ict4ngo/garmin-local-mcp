@@ -421,5 +421,7 @@ def serve_http(
 
     from .http_auth import create_http_app
 
-    uvicorn.run(create_http_app(mcp, token), host=host, port=port)
+    uvicorn.run(
+        create_http_app(mcp, token, config.http_allowed_hosts()), host=host, port=port
+    )
     return 0

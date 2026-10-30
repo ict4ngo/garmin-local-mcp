@@ -16,7 +16,7 @@ import uvicorn
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from garmin_mcp import server
+from garmin_mcp import config, server
 from garmin_mcp.cli import build_parser
 from garmin_mcp.http_auth import create_http_app
 
@@ -34,7 +34,7 @@ def test_serve_http_cli_has_bind_defaults_and_overrides() -> None:
 
 
 @pytest.fixture(scope="module")
-def http_server(tmp_path_factory) -> Iterator[str]:
+def http_server(tmp_path_factory) -> Iterator[tuple[str, str]]:
     env_names = (
         "GARMIN_MCP_DATA_DIR",
         "GARMIN_MCP_DATABASE_URL",
@@ -52,12 +52,17 @@ def http_server(tmp_path_factory) -> Iterator[str]:
     os.environ["GARMIN_MCP_TIMEZONE"] = "UTC"
     server._config = None
 
-    app = create_http_app(server.mcp, TOKEN)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
     sock.listen(128)
     port = sock.getsockname()[1]
+    lan_host = f"192.168.1.42:{port}"
+    app = create_http_app(
+        server.mcp,
+        TOKEN,
+        allowed_hosts=[lan_host, "127.0.0.1:*", "localhost:*"],
+    )
 
     instance = uvicorn.Server(
         uvicorn.Config(app, log_level="error", access_log=False, lifespan="on")
@@ -83,7 +88,7 @@ def http_server(tmp_path_factory) -> Iterator[str]:
         pytest.fail("Uvicorn did not start the HTTP test server")
 
     try:
-        yield f"http://127.0.0.1:{port}/mcp"
+        yield f"http://127.0.0.1:{port}/mcp", lan_host
     finally:
         instance.should_exit = True
         thread.join(timeout=10)
@@ -97,15 +102,22 @@ def http_server(tmp_path_factory) -> Iterator[str]:
             pytest.fail("Uvicorn HTTP test server did not stop")
 
 
-def test_http_requires_bearer_token(http_server: str) -> None:
-    response = httpx.post(http_server, json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+def test_http_requires_bearer_token(http_server: tuple[str, str]) -> None:
+    response = httpx.post(
+        http_server[0],
+        headers={"Host": http_server[1]},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+    )
     assert response.status_code == 401
 
 
-def test_http_rejects_wrong_token(http_server: str) -> None:
+def test_http_rejects_wrong_token(http_server: tuple[str, str]) -> None:
     response = httpx.post(
-        http_server,
-        headers={"Authorization": "Bearer not-the-token"},
+        http_server[0],
+        headers={
+            "Authorization": "Bearer not-the-token",
+            "Host": http_server[1],
+        },
         json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
     )
     assert response.status_code == 401
@@ -117,13 +129,13 @@ def test_http_startup_requires_bearer_token(monkeypatch) -> None:
         server.serve_http()
 
 
-def test_streamable_http_initialize_and_tool_call(http_server: str) -> None:
+def test_streamable_http_initialize_and_tool_call(http_server: tuple[str, str]) -> None:
     async def exercise_mcp() -> None:
         async with httpx.AsyncClient(
             headers={"Authorization": f"Bearer {TOKEN}"}
         ) as http_client:
             async with streamable_http_client(
-                http_server, http_client=http_client
+                http_server[0], http_client=http_client
             ) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -134,3 +146,47 @@ def test_streamable_http_initialize_and_tool_call(http_server: str) -> None:
                     assert json.loads(result.content[0].text)["logged_in"] is False
 
     asyncio.run(exercise_mcp())
+
+
+def test_http_accepts_configured_lan_host(http_server: tuple[str, str]) -> None:
+    async def exercise_mcp() -> None:
+        async with httpx.AsyncClient(
+            headers={
+                "Authorization": f"Bearer {TOKEN}",
+                "Host": http_server[1],
+            }
+        ) as http_client:
+            async with streamable_http_client(
+                http_server[0], http_client=http_client
+            ) as (read_stream, write_stream, _):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.call_tool("auth_status", {})
+                    assert result.isError is False
+                    assert json.loads(result.content[0].text)["logged_in"] is False
+
+    asyncio.run(exercise_mcp())
+
+
+def test_http_rejects_unlisted_host(http_server: tuple[str, str]) -> None:
+    response = httpx.post(
+        http_server[0],
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Host": "192.168.1.143:8000",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+    )
+    assert response.status_code == 421
+
+
+def test_http_allowed_hosts_follow_compose_runtime_config(monkeypatch) -> None:
+    monkeypatch.setenv("GARMIN_MCP_LAN_IP", "192.168.1.143")
+    monkeypatch.setenv("GARMIN_MCP_HTTP_PORT", "8123")
+
+    assert config.http_allowed_hosts() == [
+        "192.168.1.143:8123",
+        "127.0.0.1:*",
+        "localhost:*",
+        "[::1]:*",
+    ]

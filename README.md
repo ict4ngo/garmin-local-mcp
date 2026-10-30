@@ -105,8 +105,14 @@ Set `GARMIN_MCP_TIMEZONE` to your IANA timezone (for example
 `GARMIN_MCP_LAN_IP` defaults to `127.0.0.1`; set it to the Docker host's
 private LAN interface IP (for example `192.168.1.20`) to allow other trusted
 LAN machines to connect. `GARMIN_MCP_HTTP_PORT` defaults to `8000` and changes
-the published host port without changing the container port. The worker does
-not receive `GARMIN_MCP_HTTP_BEARER_TOKEN`; only the MCP service needs it.
+the published host port without changing the container port. DNS-rebinding
+protection remains enabled: the MCP service accepts only the exact configured
+`GARMIN_MCP_LAN_IP:GARMIN_MCP_HTTP_PORT` Host (and loopback Host aliases), not
+arbitrary hostnames or other LAN IPs. The remote client URL must use that
+configured LAN IP, not `localhost` or `0.0.0.0`; the loopback default remains
+available for local development. The worker does not receive
+`GARMIN_MCP_HTTP_BEARER_TOKEN`, `GARMIN_MCP_LAN_IP`, or
+`GARMIN_MCP_HTTP_PORT`; only the MCP service needs those HTTP settings.
 The Compose schedule default is `06:00,18:00`; edit `GARMIN_MCP_SYNC_TIMES` in
 `.env` to any comma-separated local `HH:MM` times. For example, setting it to
 `07:15,21:45` changes the worker schedule on the next container recreation; it
@@ -190,7 +196,7 @@ Keep off-host encrypted copies of both backups. Do not use `docker compose down
 
 ### Remote HTTP clients
 
-The HTTP endpoint is `http://<private-LAN-IP>:<GARMIN_MCP_HTTP_PORT>/mcp`.
+The HTTP endpoint is `http://<GARMIN_MCP_LAN_IP>:<GARMIN_MCP_HTTP_PORT>/mcp`.
 Set `GARMIN_MCP_LAN_IP` to the host's private LAN interface and optionally
 change `GARMIN_MCP_HTTP_PORT` in `.env`; recreate the MCP container after edits,
 without rebuilding the image. Use the configured static Bearer token. **Plain

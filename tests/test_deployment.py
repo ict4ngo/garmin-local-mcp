@@ -133,3 +133,15 @@ def test_compose_lan_bind_and_port_are_configurable(tmp_path):
     assert str(port["published"]) == "8123"
     assert str(port["target"]) == "8000"
     assert not config["services"]["postgres"].get("ports")
+
+
+def test_compose_passes_host_allowlist_inputs_to_mcp_only(tmp_path):
+    config = compose_config(tmp_path, lan_ip="192.168.1.143", http_port=8123)
+    services = config["services"]
+    mcp_environment = services["mcp"]["environment"]
+    worker_environment = services["sync-worker"]["environment"]
+
+    assert mcp_environment["GARMIN_MCP_LAN_IP"] == "192.168.1.143"
+    assert str(mcp_environment["GARMIN_MCP_HTTP_PORT"]) == "8123"
+    assert "GARMIN_MCP_LAN_IP" not in worker_environment
+    assert "GARMIN_MCP_HTTP_PORT" not in worker_environment
