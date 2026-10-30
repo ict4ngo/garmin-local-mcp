@@ -160,7 +160,9 @@ it can be throttled and allowed to take hours or days.
   overridable in the Compose environment (for example via `.env`).
   Bind the published MCP port to a configurable host IP; default to loopback
   for safety and document setting it to the homelab's private LAN IP for remote
-  clients. The published host port must also be configurable. Keep PostgreSQL
+  clients. Validate the bind IP as loopback or private unicast and reject
+  public, unspecified, multicast, reserved, or link-local addresses. The
+  published host port must also be configurable. Keep PostgreSQL
   private. The service should not be exposed publicly by default. Recommend
   HTTPS termination at a trusted reverse proxy if the traffic crosses an
   untrusted network.
