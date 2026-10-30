@@ -12,16 +12,16 @@ works fully offline over already-synced history.
 from __future__ import annotations
 
 import functools
-import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from datetime import date as date_type
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from psycopg import Connection
 
-from . import analysis, auth, config, db, demo, importer
+from . import analysis, auth, config, db, demo, importer, timeseries
 from . import sync as sync_engine
 from .config import Config
 
@@ -30,7 +30,7 @@ DEFAULT_RANGE_DAYS = 30
 
 _TABLES = ("daily_wellness", "sleep", "hrv", "training_status", "activities")
 
-mcp = FastMCP("garmin")
+mcp = FastMCP("garmin", json_response=True, stateless_http=True)
 
 _config: Config | None = None
 
@@ -43,10 +43,10 @@ def _cfg() -> Config:
     return _config
 
 
-def _connect(cfg: Config) -> sqlite3.Connection:
-    # One short-lived connection per call: sqlite connections are cheap and
+def _connect(cfg: Config) -> Connection:
+    # One short-lived connection per call: database connections are cheap and
     # this avoids stale handles across a long-running server process.
-    return db.connect(cfg.db_path)
+    return db.connect(cfg.database_url)
 
 
 def _default_range(cfg: Config, start: str | None, end: str | None) -> tuple[str, str]:
@@ -128,18 +128,34 @@ def sync_status() -> dict:
     with closing(_connect(cfg)) as conn:
         coverage = {}
         for table in _TABLES:
-            first, last, count = conn.execute(
-                f"SELECT MIN(date), MAX(date), COUNT(*) FROM {table}"  # noqa: S608
+            row = conn.execute(
+                f"SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS count FROM {table}"  # noqa: S608
             ).fetchone()
-            coverage[table] = {"rows": count, "first": first, "last": last}
-        last_sync = conn.execute("SELECT MAX(updated_at) FROM sync_state").fetchone()[0]
+            coverage[table] = {
+                "rows": row["count"],
+                "first": row["first"],
+                "last": row["last"],
+            }
+        last_sync = conn.execute(
+            "SELECT MAX(updated_at) AS last_sync FROM sync_state"
+        ).fetchone()["last_sync"]
         errors = conn.execute(
             "SELECT endpoint, date, last_error FROM sync_state "
             "WHERE status='error' ORDER BY date DESC, endpoint LIMIT 10"
         ).fetchall()
         n_errors = conn.execute(
-            "SELECT COUNT(*) FROM sync_state WHERE status='error'"
-        ).fetchone()[0]
+            "SELECT COUNT(*) AS count FROM sync_state WHERE status='error'"
+        ).fetchone()["count"]
+        backfill_rows = conn.execute(
+            """SELECT endpoint, cursor_date, last_date, empty_streak, status, last_error, updated_at
+               FROM backfill_state ORDER BY endpoint"""
+        ).fetchall()
+        samples_coverage = conn.execute(
+            """SELECT source_endpoint, MIN(source_date) AS first, MAX(source_date) AS last,
+                      COUNT(*) AS count FROM samples GROUP BY source_endpoint
+               ORDER BY source_endpoint"""
+        ).fetchall()
+        last_scheduled_run = db.get_worker_state(conn, "last_scheduled_run")
         # Surfaced so an assistant never reports generated numbers as real
         # measurements. Absent for normal stores.
         generated = demo.is_demo(conn)
@@ -153,6 +169,22 @@ def sync_status() -> dict:
             else {}
         ),
         "coverage": coverage,
+        "schedule": {"times": list(cfg.sync_times), "timezone": cfg.timezone},
+        "last_scheduled_run": last_scheduled_run,
+        "backfill": {
+            "enabled": cfg.backfill_enabled,
+            "lower_bound": cfg.backfill_start_date,
+            "empty_streak_days": cfg.backfill_empty_streak_days,
+            "endpoints": [dict(row) for row in backfill_rows],
+        },
+        "samples_coverage": {
+            row["source_endpoint"]: {
+                "rows": row["count"],
+                "first": row["first"],
+                "last": row["last"],
+            }
+            for row in samples_coverage
+        },
         "last_sync": last_sync,
         "pending_errors": n_errors,
         "recent_errors": [
@@ -172,6 +204,55 @@ def get_day(date: str) -> dict:
     """
     with closing(_connect(_cfg())) as conn:
         return analysis.get_day(conn, date)
+
+
+@mcp.tool()
+@_tool_errors
+def query_samples(
+    metrics: list[str],
+    start: str,
+    end: str,
+    timezone: str,
+    limit: int = 1000,
+    offset: int = 0,
+) -> dict:
+    """Return bounded raw timestamped samples in an ISO datetime range.
+
+    Bounds may include a UTC offset; naive values are interpreted in the given
+    IANA timezone. The start is inclusive and end is exclusive.
+    """
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("start and end must be valid ISO datetimes") from exc
+    with closing(_connect(_cfg())) as conn:
+        return timeseries.query_samples(conn, metrics, start_dt, end_dt, timezone, limit, offset)
+
+
+@mcp.tool()
+@_tool_errors
+def compare_time_windows(
+    metric: str,
+    start_date: str,
+    end_date: str,
+    windows: list[timeseries.TimeWindow],
+    timezone: str,
+) -> dict:
+    """Compare a sample metric across named local-clock windows and dates.
+
+    Each date is weighted once using its window mean, regardless of how many
+    samples Garmin recorded that day. End dates are inclusive.
+    """
+    try:
+        start_day = date_type.fromisoformat(start_date)
+        end_day = date_type.fromisoformat(end_date)
+    except ValueError as exc:
+        raise ValueError("start_date and end_date must use YYYY-MM-DD") from exc
+    with closing(_connect(_cfg())) as conn:
+        return timeseries.compare_time_windows(
+            conn, metric, start_day, end_day, windows, timezone
+        )
 
 
 @mcp.tool()
@@ -276,7 +357,7 @@ def get_activity(activity_id: int) -> dict:
     """
     with closing(_connect(_cfg())) as conn:
         row = conn.execute(
-            "SELECT * FROM activities WHERE activity_id=?", (activity_id,)
+            "SELECT * FROM activities WHERE activity_id=%s", (activity_id,)
         ).fetchone()
     if row is None:
         return {"error": f"No activity with id {activity_id}"}
@@ -294,7 +375,7 @@ def gaps(start: str | None = None, end: str | None = None) -> dict:
     cfg = _cfg()
     with closing(_connect(cfg)) as conn:
         if start is None:
-            start = conn.execute("SELECT MIN(date) FROM sync_state").fetchone()[0]
+            start = conn.execute("SELECT MIN(date) AS first FROM sync_state").fetchone()["first"]
             if start is None:
                 raise ValueError("No synced data yet - run the sync tool or CLI first")
         end = end or sync_engine.yesterday(cfg)
@@ -312,7 +393,7 @@ def import_fit(folder: str) -> dict:
     cfg = _cfg()
     cfg.ensure_dirs()
     with closing(_connect(cfg)) as conn:
-        return importer.import_bundle(conn, Path(folder))
+        return importer.import_bundle(conn, Path(folder), raw_dir=cfg.raw_dir)
 
 
 def serve(cfg: Config | None = None) -> int:
@@ -321,4 +402,26 @@ def serve(cfg: Config | None = None) -> int:
     if cfg is not None:
         _config = cfg
     mcp.run(transport="stdio")
+    return 0
+
+
+def serve_http(
+    cfg: Config | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> int:
+    """Run the Bearer-protected Streamable HTTP MCP server."""
+    token = config.http_bearer_token()
+    if cfg is not None:
+        global _config
+        _config = cfg
+
+    import uvicorn
+
+    from .http_auth import create_http_app
+
+    uvicorn.run(
+        create_http_app(mcp, token, config.http_allowed_hosts()), host=host, port=port
+    )
     return 0

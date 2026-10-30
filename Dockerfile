@@ -1,7 +1,6 @@
-# Runs the MCP server over stdio. The data directory is a volume so the
-# warehouse survives container restarts:
-#   docker build -t garmin-local-mcp .
-#   docker run -i -v garmin-data:/data garmin-local-mcp
+# The image includes the CLI for stdio, HTTP, worker, login, and migration use.
+# Compose runs the authenticated HTTP server and worker with shared persistent
+# app data; CLI commands can be run with `docker compose run --rm mcp <command>`.
 FROM python:3.12-slim
 
 WORKDIR /app

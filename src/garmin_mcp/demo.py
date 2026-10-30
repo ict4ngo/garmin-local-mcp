@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import math
 import random
-import sqlite3
 from datetime import date as date_type
 from datetime import timedelta
+
+from psycopg import Connection
 
 from . import db
 
@@ -51,7 +52,7 @@ def _dates(end: date_type, days: int) -> list[date_type]:
 
 
 def generate(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     days: int = DEMO_DAYS,
     end: str | None = None,
@@ -304,23 +305,24 @@ def generate(
 
 
 def _record_provenance(
-    conn: sqlite3.Connection, days: int, start: date_type, end: date_type, seed: int
+    conn: Connection, days: int, start: date_type, end: date_type, seed: int
 ) -> None:
     """Mark the store as generated, so it can never be mistaken for real data."""
-    with conn:
+    with conn.transaction():
         conn.execute(
             "CREATE TABLE IF NOT EXISTS demo_info ("
-            "generated_at TEXT, days INT, start TEXT, end TEXT, seed INT)"
+            'generated_at TEXT, days INT, "start" TEXT, "end" TEXT, seed INT)'
         )
         conn.execute("DELETE FROM demo_info")
         conn.execute(
-            "INSERT INTO demo_info (generated_at, days, start, end, seed) VALUES (?, ?, ?, ?, ?)",
+            'INSERT INTO demo_info (generated_at, days, "start", "end", seed) '
+            "VALUES (%s, %s, %s, %s, %s)",
             (db.utcnow(), days, start.isoformat(), end.isoformat(), seed),
         )
 
 
-def is_demo(conn: sqlite3.Connection) -> bool:
+def is_demo(conn: Connection) -> bool:
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='demo_info'"
+        "SELECT EXISTS (SELECT 1 FROM demo_info) AS present"
     ).fetchone()
-    return row is not None
+    return row["present"]

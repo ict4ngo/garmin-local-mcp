@@ -40,7 +40,10 @@
         "serve"
       ],
       "env": {
-        "GARMIN_MCP_DATA_DIR": "${user_config.data_dir}"
+        "GARMIN_MCP_DATA_DIR": "${user_config.data_dir}",
+        "GARMIN_MCP_DATABASE_URL": "${user_config.database_url}",
+        "GARMIN_MCP_TIMEZONE": "${user_config.timezone}",
+        "GARMIN_MCP_SYNC_TIMES": "${user_config.sync_times}"
       }
     }
   },
@@ -48,9 +51,28 @@
     "data_dir": {
       "type": "directory",
       "title": "Data directory",
-      "description": "Where your synced Garmin data lives (raw JSON snapshots, SQLite warehouse, and login tokens). Use the same directory the CLI uses.",
+      "description": "Where raw JSON snapshots, FIT files, and login tokens live. Use the same directory the CLI uses.",
       "default": "${HOME}/.garmin-mcp",
       "required": false
+    },
+    "database_url": {
+      "type": "string",
+      "title": "PostgreSQL connection URL",
+      "description": "Required PostgreSQL connection URL for the warehouse. Treat this value as a secret.",
+      "required": true,
+      "sensitive": true
+    },
+    "timezone": {
+      "type": "string",
+      "title": "IANA timezone",
+      "description": "Timezone used for local dates and sync scheduling, for example America/Denver.",
+      "required": true
+    },
+    "sync_times": {
+      "type": "string",
+      "title": "Scheduled sync times",
+      "description": "Comma-separated local HH:MM times, for example 06:00,18:00.",
+      "required": true
     }
   },
   "tools": [

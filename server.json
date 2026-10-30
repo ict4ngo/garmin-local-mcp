@@ -22,6 +22,27 @@
           "format": "string",
           "isSecret": false,
           "name": "GARMIN_MCP_DATA_DIR"
+        },
+        {
+          "description": "Required PostgreSQL connection URL for the local warehouse",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true,
+          "name": "GARMIN_MCP_DATABASE_URL"
+        },
+        {
+          "description": "Required IANA timezone used for local dates and scheduled syncs",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "GARMIN_MCP_TIMEZONE"
+        },
+        {
+          "description": "Required comma-separated local sync times in HH:MM format",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "GARMIN_MCP_SYNC_TIMES"
         }
       ]
     }

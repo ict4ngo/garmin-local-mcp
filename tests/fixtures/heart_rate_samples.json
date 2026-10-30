@@ -1,0 +1,9 @@
+{
+  "calendarDate": "2026-01-15",
+  "heartRateValues": [
+    [1768478400000, 73],
+    [1768479300000, 75],
+    {"timestampLocal": "2026-01-15T07:30:00-05:00", "value": 76}
+  ],
+  "startTimestampLocal": "2026-01-15T07:00:00-05:00"
+}

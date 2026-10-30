@@ -7,6 +7,7 @@ subcommand among peers, so the warehouse has value even without an MCP client.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from . import __version__
@@ -17,6 +18,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
 
     return serve(args.config)
+
+
+def cmd_serve_http(args: argparse.Namespace) -> int:
+    from .server import serve_http
+
+    return serve_http(args.config, host=args.host, port=args.port)
+
+
+def cmd_worker(args: argparse.Namespace) -> int:
+    from .worker import run_worker
+
+    return run_worker(args.config)
 
 
 def cmd_login(args: argparse.Namespace) -> int:
@@ -62,10 +75,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(f"{e} ({e.hint})", file=sys.stderr)
         return 1
 
-    conn = db.connect(config.db_path)
-    report = sync.sync_range(
-        config, conn, client, start, end, endpoints=endpoints, force=args.force
-    )
+    conn = db.connect(config.database_url)
+    try:
+        report = sync.sync_range(
+            config, conn, client, start, end, endpoints=endpoints, force=args.force
+        )
+    finally:
+        conn.close()
     print(f"sync {report['start']}..{report['end']}: "
           f"{report['requests']} requests, {report['rows']} rows")
     for name, s in report["endpoints"].items():
@@ -85,28 +101,45 @@ def cmd_status(args: argparse.Namespace) -> int:
     from . import db
 
     config = args.config
-    if not config.db_path.is_file():
-        print(f"No database yet at {config.db_path} - run: garmin-local-mcp sync")
-        return 0
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     print(f"data dir: {config.data_dir}")
     print("coverage:")
+    has_data = False
     for table in ("daily_wellness", "sleep", "hrv", "training_status", "activities"):
-        first, last, count = conn.execute(
-            f"SELECT MIN(date), MAX(date), COUNT(*) FROM {table}"  # noqa: S608 - fixed names
+        coverage = conn.execute(
+            f"SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS count FROM {table}"  # noqa: S608 - fixed names
         ).fetchone()
-        span = f"{first} .. {last}" if count else "(no data)"
-        print(f"  {table:16} {count:6} rows  {span}")
-    errors = conn.execute(
-        "SELECT endpoint, date, last_error FROM sync_state "
-        "WHERE status='error' ORDER BY date, endpoint"
-    ).fetchall()
-    if errors:
-        print(f"pending sync errors ({len(errors)}):")
-        for row in errors:
-            print(f"  {row['date']} {row['endpoint']}: {row['last_error']}")
+        has_data = has_data or coverage["count"] > 0
+        span = (
+            f"{coverage['first']} .. {coverage['last']}"
+            if coverage["count"]
+            else "(no data)"
+        )
+        print(f"  {table:16} {coverage['count']:6} rows  {span}")
+    if not has_data:
+        print("No database rows yet - run: garmin-local-mcp sync")
     else:
-        print("pending sync errors: none")
+        errors = conn.execute(
+            "SELECT endpoint, date, last_error FROM sync_state "
+            "WHERE status='error' ORDER BY date, endpoint"
+        ).fetchall()
+        if errors:
+            print(f"pending sync errors ({len(errors)}):")
+            for row in errors:
+                print(f"  {row['date']} {row['endpoint']}: {row['last_error']}")
+        else:
+            print("pending sync errors: none")
+    last_scheduled = db.get_worker_state(conn, "last_scheduled_run")
+    print(f"schedule: {', '.join(config.sync_times)} ({config.timezone})")
+    print(f"last scheduled run: {last_scheduled or 'none'}")
+    backfill = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM backfill_state GROUP BY status ORDER BY status"
+    ).fetchall()
+    backfill_summary = ", ".join(
+        f"{row['status']}={row['count']}" for row in backfill
+    ) or "not started"
+    print(f"backfill: {backfill_summary}")
+    conn.close()
     return 0
 
 
@@ -116,12 +149,14 @@ def cmd_import_fit(args: argparse.Namespace) -> int:
 
     config = args.config
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
     try:
-        report = import_bundle(conn, args.folder, force=args.force)
+        report = import_bundle(conn, args.folder, force=args.force, raw_dir=config.raw_dir)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 1
+    finally:
+        conn.close()
     print(f"date: {report['date']}")
     print(f"imported: {', '.join(report['imported']) or '(nothing)'}")
     if report["skipped"]:
@@ -131,31 +166,58 @@ def cmd_import_fit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate_sqlite(args: argparse.Namespace) -> int:
+    from .sqlite_import import migrate_sqlite
+
+    try:
+        report = migrate_sqlite(
+            args.source, args.config.database_url, source_stopped=args.source_stopped
+        )
+    except Exception:
+        print(
+            "SQLite migration failed. Verify the source file, stop all SQLite writers, "
+            "and check PostgreSQL settings; error details are omitted to protect credentials.",
+            file=sys.stderr,
+        )
+        return 1
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     from . import db, demo
 
     config = args.config
-    if config.db_path.is_file():
-        conn = db.connect(config.db_path)
-        # Never overwrite real data. A demo store may be regenerated freely.
-        generated = demo.is_demo(conn)
-        conn.close()
-        if not generated and not args.force:
-            print(
-                f"{config.db_path} already exists and does not look like a demo store.\n"
-                f"Refusing to overwrite real data. Use a separate directory:\n"
-                f"  garmin-local-mcp --data-dir ~/.garmin-mcp-demo demo\n"
-                f"or pass --force if you are certain.",
-                file=sys.stderr,
-            )
-            return 2
-        config.db_path.unlink()
-        for suffix in ("-wal", "-shm"):
-            sidecar = config.db_path.with_name(config.db_path.name + suffix)
-            sidecar.unlink(missing_ok=True)
-
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
+    conn = db.connect(config.database_url)
+    generated = demo.is_demo(conn)
+    protected_tables = (
+        "daily_wellness", "sleep", "hrv", "activities", "training_status",
+        "raw_snapshots", "sync_state", "samples", "activity_detail_state",
+        "backfill_state", "worker_state",
+    )
+    has_data = any(
+        conn.execute(f"SELECT EXISTS (SELECT 1 FROM {table}) AS present").fetchone()["present"]
+        for table in protected_tables
+    )
+    if has_data and not generated and not args.force:
+        conn.close()
+        print(
+            "The PostgreSQL warehouse already contains real data and does not look like a demo.\n"
+            "Refusing to overwrite real data. Use a separate GARMIN_MCP_DATABASE_URL\n"
+            "for demo data,\n"
+            "or pass --force if you are certain.",
+            file=sys.stderr,
+        )
+        return 2
+    if has_data:
+        with conn.transaction():
+            for table in (
+                "daily_wellness", "sleep", "hrv", "activities", "training_status",
+                "raw_snapshots", "sync_state", "samples", "activity_detail_state",
+                "backfill_state", "worker_state", "demo_info",
+            ):
+                conn.execute(f"DELETE FROM {table}")
     try:
         report = demo.generate(conn, days=args.days, end=args.end, seed=args.seed)
     except ValueError as e:
@@ -166,7 +228,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         conn.close()
 
     total = sum(report["rows"].values())
-    print(f"Generated a demo store at {config.db_path}")
+    print("Generated a demo store in the configured PostgreSQL warehouse")
     print(f"  {report['days']} days, {report['start']} .. {report['end']}, {total} rows")
     for table, count in report["rows"].items():
         print(f"    {table:16} {count:5}")
@@ -184,8 +246,11 @@ def cmd_reparse(args: argparse.Namespace) -> int:
 
     config = args.config
     config.ensure_dirs()
-    conn = db.connect(config.db_path)
-    report = sync.reparse(config, conn)
+    conn = db.connect(config.database_url)
+    try:
+        report = sync.reparse(config, conn)
+    finally:
+        conn.close()
     if report["unknown_endpoints"]:
         print(f"skipped {report['unknown_endpoints']} snapshots from unknown endpoints")
     return 0
@@ -210,6 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve", help="Run the stdio MCP server (never prompts)")
     p.set_defaults(func=cmd_serve)
 
+    p = sub.add_parser("serve-http", help="Run the Bearer-protected Streamable HTTP MCP server")
+    p.add_argument("--host", default="127.0.0.1", help="Address to bind (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
+    p.set_defaults(func=cmd_serve_http)
+
+    p = sub.add_parser("worker", help="Run the scheduled sync and history backfill worker")
+    p.set_defaults(func=cmd_worker)
+
     p = sub.add_parser("login", help="Interactive Garmin Connect login (supports MFA)")
     p.add_argument("--status", action="store_true", help="Show token status and exit")
     p.add_argument("--logout", action="store_true", help="Delete stored tokens and exit")
@@ -231,6 +304,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Overwrite even rows sourced from the API"
     )
     p.set_defaults(func=cmd_import_fit)
+
+    p = sub.add_parser(
+        "migrate-sqlite", help="Copy a legacy SQLite database into the PostgreSQL warehouse"
+    )
+    p.add_argument("--from", dest="source", required=True, metavar="PATH")
+    p.add_argument(
+        "--source-stopped",
+        action="store_true",
+        required=True,
+        help="Confirm every process writing the legacy SQLite warehouse has been stopped",
+    )
+    p.set_defaults(func=cmd_migrate_sqlite)
 
     from .demo import DEMO_DAYS, DEMO_SEED
 

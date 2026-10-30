@@ -1,0 +1,9 @@
+{
+  "calendarDate": "2026-01-15",
+  "stressValuesArray": [
+    [1768478400000, 35],
+    [1768479300000, 42],
+    [1768480200000, -1]
+  ],
+  "unrecognizedGarminField": {"keep": true}
+}

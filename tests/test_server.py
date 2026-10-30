@@ -7,30 +7,40 @@ the server's cached config is reset per test. No network anywhere.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from garmin_mcp import db, server
 
 BASE = date(2026, 6, 1)
 
 EXPECTED_TOOLS = {
-    "auth_status", "sync", "sync_status", "get_day", "query_metrics", "correlate",
+    "auth_status", "sync", "sync_status", "get_day", "query_metrics", "query_samples",
+    "compare_time_windows", "correlate",
     "baselines", "anomalies", "list_activities", "get_activity", "gaps", "import_fit",
 }
 
 
 @pytest.fixture
-def data_dir(tmp_path, monkeypatch):
+def data_dir(tmp_path, monkeypatch, postgres_connection, test_database_url):
     monkeypatch.setenv("GARMIN_MCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("GARMIN_MCP_DATABASE_URL", test_database_url)
+    monkeypatch.setenv("GARMIN_MCP_SYNC_TIMES", "09:00")
+    monkeypatch.setenv("GARMIN_MCP_TIMEZONE", "America/New_York")
     monkeypatch.setattr(server, "_config", None)  # drop any cached config
     return tmp_path
 
 
 def seed_month(data_dir) -> None:
-    conn = db.connect(data_dir / "garmin.db")
+    conn = db.connect(os.environ["GARMIN_MCP_DATABASE_URL"])
     for i in range(30):
         d = (BASE + timedelta(days=i)).isoformat()
         db.upsert(
@@ -44,9 +54,33 @@ def seed_month(data_dir) -> None:
     conn.close()
 
 
-def test_all_twelve_tools_registered():
+def test_all_fourteen_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
+
+
+def test_stdio_tools_remain_registered(data_dir):
+    async def list_stdio_tools() -> set[str]:
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[
+                "-c",
+                "from garmin_mcp.cli import main; raise SystemExit(main())",
+                "serve",
+            ],
+            env=os.environ.copy(),
+            cwd=Path(__file__).parents[1],
+        )
+        async with stdio_client(parameters) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                result = await session.call_tool("auth_status", {})
+                assert result.isError is False
+                assert json.loads(result.content[0].text)["logged_in"] is False
+                return {tool.name for tool in tools.tools}
+
+    assert asyncio.run(list_stdio_tools()) == EXPECTED_TOOLS
 
 
 def test_auth_status_without_tokens(data_dir):
@@ -128,6 +162,9 @@ def test_sync_status_reports_coverage(data_dir):
     assert res["coverage"]["activities"]["rows"] == 0
     assert res["pending_errors"] == 0 and res["recent_errors"] == []
     assert res["last_sync"] is not None
+    assert "backfill" in res and "last_scheduled_run" in res
+    assert "samples_coverage" in res
+    assert "database_url" not in res and "tokens_dir" not in res
 
 
 def test_import_fit_bad_folder_is_a_structured_error(data_dir, tmp_path):

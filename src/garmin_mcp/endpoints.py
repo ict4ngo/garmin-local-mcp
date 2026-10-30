@@ -8,10 +8,13 @@ parser bug never loses data - `reparse` re-runs these functions offline.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from .samples import Sample
 
 # A parse result: (table name, row dict). Rows may be partial - the sync
 # engine upserts them with db.upsert_partial so two endpoints can each
@@ -33,6 +36,13 @@ class Endpoint:
     name: str
     fetch: Callable[[Any, str], Any]  # (client, date) -> raw payload
     parse: Callable[[Any, str], list[ParsedRow]]  # (payload, date) -> rows
+
+
+@dataclass(frozen=True)
+class SampleEndpoint:
+    name: str
+    fetch: Callable[[Any, str], Any]
+    parse: Callable[[Any, str], list[Sample]]
 
 
 def _get(obj: Any, *path: str) -> Any:
@@ -149,6 +159,300 @@ def parse_sleep(payload: Any, date: str) -> list[ParsedRow]:
         # clobbering whatever usersummary wrote (or will write).
         rows.append(("daily_wellness", {"date": date, "skin_temp_dev_c": skin_temp}))
     return rows
+
+
+def _as_timestamp(value: Any, *, gmt: bool = False) -> datetime | None:
+    """Decode an upstream timestamp without inventing a timezone or time point."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        # Garmin chart arrays use Unix epoch milliseconds.
+        seconds = value / 1000 if abs(value) >= 100_000_000_000 else value
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        # A wall-clock timestamp alone is not enough to identify an instant.
+        return parsed.replace(tzinfo=UTC) if gmt else None
+    return parsed.astimezone(UTC)
+
+
+def _timestamp_local(row: Any) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    for key in ("localTimestamp", "timestampLocal", "startTimestampLocal"):
+        value = row.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _sample_value(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _source_records(payload: Any) -> list[dict]:
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _parse_series(
+    payload: Any,
+    date: str,
+    endpoint: str,
+    metric: str,
+    unit: str | None,
+    array_keys: tuple[str, ...],
+    value_key: str = "value",
+    sentinels: tuple[float, ...] = (),
+) -> list[Sample]:
+    parsed: list[Sample] = []
+    for record in _source_records(payload):
+        source_date = record.get("calendarDate") or record.get("date") or date
+        if not isinstance(source_date, str):
+            source_date = date
+        for array_key in array_keys:
+            values = record.get(array_key)
+            if not isinstance(values, list):
+                continue
+            for index, item in enumerate(values):
+                timestamp = sample_value = None
+                local_timestamp = _timestamp_local(item)
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    timestamp, sample_value = item[0], item[1]
+                    is_gmt = False
+                elif isinstance(item, dict):
+                    timestamp_key = next(
+                        (
+                            key
+                            for key in (
+                                "timestamp",
+                                "timestampGMT",
+                                "startGMT",
+                                "startTimestampGMT",
+                                "timestampLocal",
+                                "localTimestamp",
+                                "startTimestampLocal",
+                            )
+                            if item.get(key) is not None
+                        ),
+                        None,
+                    )
+                    timestamp = item.get(timestamp_key) if timestamp_key else None
+                    is_gmt = timestamp_key in ("timestampGMT", "startGMT", "startTimestampGMT")
+                    sample_value = item.get(value_key)
+                    if sample_value is None and value_key != "activityLevel":
+                        sample_value = item.get("activityLevel")
+                else:
+                    continue
+                observed_at = _as_timestamp(timestamp, gmt=is_gmt)
+                value = _sample_value(sample_value)
+                if observed_at is None or value is None or value in sentinels:
+                    continue
+                parsed.append(
+                    Sample(
+                        source_endpoint=endpoint,
+                        source_id=source_date,
+                        metric=metric,
+                        observed_at=observed_at,
+                        source_date=source_date,
+                        sample_index=index,
+                        value=value,
+                        unit=unit,
+                        local_timestamp=local_timestamp,
+                    )
+                )
+    return parsed
+
+
+def parse_stress_samples(payload: Any, date: str) -> list[Sample]:
+    return _parse_series(
+        payload, date, "stress", "stress_level", "stress_level", ("stressValuesArray",),
+        sentinels=(-1.0,)
+    )
+
+
+def parse_body_battery_samples(payload: Any, date: str) -> list[Sample]:
+    return _parse_series(
+        payload, date, "body_battery", "body_battery", "body_battery",
+        ("bodyBatteryValuesArray",)
+    )
+
+
+def parse_heart_rate_samples(payload: Any, date: str) -> list[Sample]:
+    return _parse_series(
+        payload, date, "heart_rates", "heart_rate", "bpm", ("heartRateValues",)
+    )
+
+
+def parse_spo2_samples(payload: Any, date: str) -> list[Sample]:
+    return _parse_series(
+        payload, date, "spo2", "spo2", "percent", ("spO2ValuesArray", "spo2ValuesArray")
+    )
+
+
+def parse_respiration_samples(payload: Any, date: str) -> list[Sample]:
+    return _parse_series(
+        payload, date, "respiration", "respiration", "breaths_per_minute",
+        ("respirationValuesArray",)
+    )
+
+
+def parse_daily_movement_samples(payload: Any, date: str) -> list[Sample]:
+    return _parse_series(
+        payload, date, "daily_movement", "movement", None, ("movementValuesArray",),
+        value_key="activityLevel"
+    )
+
+
+def parse_training_readiness_samples(payload: Any, date: str) -> list[Sample]:
+    parsed: list[Sample] = []
+    for index, item in enumerate(payload if isinstance(payload, list) else [payload]):
+        if not isinstance(item, dict):
+            continue
+        source_date = item.get("calendarDate") or item.get("date") or date
+        timestamp = item.get("timestamp")
+        observed_at = _as_timestamp(timestamp)
+        value = _sample_value(item.get("score"))
+        if observed_at is None or value is None:
+            continue
+        local_timestamp = item.get("timestampLocal")
+        parsed.append(
+            Sample(
+                source_endpoint="training_readiness",
+                source_id=str(source_date),
+                metric="training_readiness",
+                observed_at=observed_at,
+                source_date=str(source_date),
+                sample_index=index,
+                value=value,
+                unit="score",
+                local_timestamp=local_timestamp if isinstance(local_timestamp, str) else None,
+            )
+        )
+    return parsed
+
+
+def parse_sleep_samples(payload: Any, date: str) -> list[Sample]:
+    mappings = (
+        ("sleepHeartRate", "sleep_heart_rate", "bpm", "value"),
+        ("hrvData", "sleep_hrv", "ms", "value"),
+        ("sleepStress", "sleep_stress", "stress_level", "value"),
+        ("sleepLevels", "sleep_stage", "stage", "activityLevel"),
+        ("sleepMovement", "sleep_movement", "level", "activityLevel"),
+        ("sleepRestlessMoments", "sleep_restless", "count", "value"),
+    )
+    if not isinstance(payload, dict):
+        return []
+    parsed = []
+    dto = payload.get("dailySleepDTO")
+    source_date = dto.get("calendarDate", date) if isinstance(dto, dict) else date
+    for key, metric, unit, value_key in mappings:
+        parsed.extend(
+            _parse_series(
+                {"calendarDate": source_date, key: payload.get(key)}, date, "sleep", metric, unit,
+                (key,), value_key=value_key
+            )
+        )
+    return parsed
+
+
+def parse_activity_detail_samples(activity_id: int | str, payload: Any, date: str) -> list[Sample]:
+    if not isinstance(payload, dict):
+        return []
+    from garminconnect import parse_activity_detail_metrics
+
+    mappings = {
+        "directHeartRate": ("heart_rate", "bpm"),
+        "directSpeed": ("speed", "m/s"),
+        "directPower": ("power", "watts"),
+        "directCadence": ("cadence", "rpm"),
+        "directElevation": ("elevation", "m"),
+    }
+    parsed: list[Sample] = []
+    for index, values in enumerate(parse_activity_detail_metrics(payload)):
+        timestamp = values.get("directTimestamp")
+        observed_at = _as_timestamp(timestamp)
+        if observed_at is None:
+            continue
+        for source_metric, (metric, unit) in mappings.items():
+            value = _sample_value(values.get(source_metric))
+            if value is None:
+                continue
+            parsed.append(
+                Sample(
+                    source_endpoint="activity_details",
+                    source_id=str(activity_id),
+                    metric=metric,
+                    observed_at=observed_at,
+                    source_date=date,
+                    sample_index=index,
+                    value=value,
+                    unit=unit,
+                    local_timestamp=None,
+                )
+            )
+    return parsed
+
+
+def fetch_stress(client: Any, date: str) -> Any:
+    return client.get_stress_data(date)
+
+
+def fetch_body_battery(client: Any, date: str) -> Any:
+    return client.get_body_battery(date, date)
+
+
+def fetch_heart_rates(client: Any, date: str) -> Any:
+    return client.get_heart_rates(date)
+
+
+def fetch_spo2(client: Any, date: str) -> Any:
+    return client.get_spo2_data(date)
+
+
+def fetch_respiration(client: Any, date: str) -> Any:
+    return client.get_respiration_data(date)
+
+
+def fetch_daily_movement(client: Any, date: str) -> Any:
+    return client.get_daily_movement(date)
+
+
+def fetch_training_readiness(client: Any, date: str) -> Any:
+    return client.get_training_readiness(date)
+
+
+SAMPLE_ENDPOINTS: dict[str, SampleEndpoint] = {
+    endpoint.name: endpoint
+    for endpoint in (
+        SampleEndpoint("stress", fetch_stress, parse_stress_samples),
+        SampleEndpoint("body_battery", fetch_body_battery, parse_body_battery_samples),
+        SampleEndpoint("heart_rates", fetch_heart_rates, parse_heart_rate_samples),
+        SampleEndpoint("spo2", fetch_spo2, parse_spo2_samples),
+        SampleEndpoint("respiration", fetch_respiration, parse_respiration_samples),
+        SampleEndpoint("daily_movement", fetch_daily_movement, parse_daily_movement_samples),
+        SampleEndpoint(
+            "training_readiness", fetch_training_readiness, parse_training_readiness_samples
+        ),
+    )
+}
 
 
 # --- hrv -> hrv -------------------------------------------------------------

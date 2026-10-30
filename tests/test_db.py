@@ -1,17 +1,15 @@
-import sqlite3
+import psycopg
 
 from garmin_mcp import db
 
 
-def _connect(tmp_path):
-    return db.connect(tmp_path / "test.db")
-
-
-def test_schema_created(tmp_path):
-    conn = _connect(tmp_path)
+def test_schema_created(postgres_connection):
     tables = {
-        r["name"]
-        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        row["table_name"]
+        for row in postgres_connection.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema=current_schema()"
+        )
     }
     assert {
         "schema_version",
@@ -22,63 +20,67 @@ def test_schema_created(tmp_path):
         "training_status",
         "raw_snapshots",
         "sync_state",
+        "backfill_state",
+        "worker_state",
+        "sqlite_import_marker",
     } <= tables
-    version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+    version = postgres_connection.execute(
+        "SELECT MAX(version) AS version FROM schema_version"
+    ).fetchone()["version"]
     assert version == db.SCHEMA_VERSION
 
 
-def test_migrate_idempotent(tmp_path):
-    path = tmp_path / "test.db"
-    db.connect(path).close()
-    conn = db.connect(path)  # reopen: migrations must not re-apply
-    count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
+def test_migrate_idempotent(postgres_connection):
+    db.migrate(postgres_connection)
+    count = postgres_connection.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()["n"]
     assert count == len(db.MIGRATIONS)
 
 
-def test_migration_v2_adds_fitness_age_columns(tmp_path):
-    conn = _connect(tmp_path)
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(training_status)")}
+def test_migration_v2_adds_fitness_age_columns(postgres_connection):
+    cols = {
+        row["column_name"]
+        for row in postgres_connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='training_status'"
+        )
+    }
     assert {"fitness_age", "achievable_fitness_age"} <= cols
-    assert db.SCHEMA_VERSION == 2
-    # data written after migration survives a re-open (migrations never re-apply)
+    assert db.SCHEMA_VERSION == 6
     db.upsert(
-        conn,
+        postgres_connection,
         "training_status",
         {"date": "2026-07-01", "vo2max": 47.3, "fitness_age": 41.23},
         ("date",),
     )
-    conn.close()
-    conn = db.connect(tmp_path / "test.db")
-    row = conn.execute("SELECT * FROM training_status").fetchone()
+    row = postgres_connection.execute("SELECT * FROM training_status").fetchone()
     assert row["vo2max"] == 47.3 and row["fitness_age"] == 41.23
     assert row["achievable_fitness_age"] is None
 
 
-def test_upsert_overwrites_non_key_cols(tmp_path):
-    conn = _connect(tmp_path)
+def test_upsert_overwrites_non_key_cols(postgres_connection):
     row = {"date": "2026-07-01", "resting_hr": 56, "steps": 5000, "source": "api"}
-    db.upsert(conn, "daily_wellness", row, ("date",))
-    db.upsert(conn, "daily_wellness", {**row, "resting_hr": 58}, ("date",))
-    got = conn.execute("SELECT * FROM daily_wellness").fetchall()
+    db.upsert(postgres_connection, "daily_wellness", row, ("date",))
+    db.upsert(postgres_connection, "daily_wellness", {**row, "resting_hr": 58}, ("date",))
+    got = postgres_connection.execute("SELECT * FROM daily_wellness").fetchall()
     assert len(got) == 1
     assert got[0]["resting_hr"] == 58
     assert got[0]["steps"] == 5000
 
 
-def test_source_check_constraint(tmp_path):
-    conn = _connect(tmp_path)
+def test_source_check_constraint(postgres_connection):
     try:
         db.upsert(
-            conn, "daily_wellness", {"date": "2026-07-01", "source": "chrome"}, ("date",)
+            postgres_connection, "daily_wellness", {"date": "2026-07-01", "source": "chrome"},
+            ("date",),
         )
         raised = False
-    except sqlite3.IntegrityError:
+    except psycopg.errors.CheckViolation:
         raised = True
     assert raised
 
 
-def test_sync_state(tmp_path):
-    conn = _connect(tmp_path)
+def test_sync_state(postgres_connection):
+    conn = postgres_connection
     assert not db.synced_ok(conn, "sleep", "2026-07-01")
     db.mark_sync(conn, "sleep", "2026-07-01", "error", "boom")
     assert not db.synced_ok(conn, "sleep", "2026-07-01")

@@ -66,6 +66,28 @@ _METRICS = [
 
 REGISTRY: dict[str, Metric] = {m.name: m for m in _METRICS}
 
+# Metric names emitted by the timestamped parsers in endpoints.py. Keep this
+# explicit so callers cannot use arbitrary database values as metric filters.
+SAMPLE_METRICS: dict[str, str | None] = {
+    "stress_level": "stress_level",
+    "body_battery": "body_battery",
+    "heart_rate": "bpm",
+    "spo2": "percent",
+    "respiration": "breaths_per_minute",
+    "movement": None,
+    "training_readiness": "score",
+    "sleep_heart_rate": "bpm",
+    "sleep_hrv": "ms",
+    "sleep_stress": "stress_level",
+    "sleep_stage": "stage",
+    "sleep_movement": "level",
+    "sleep_restless": "count",
+    "speed": "m/s",
+    "power": "watts",
+    "cadence": "rpm",
+    "elevation": "m",
+}
+
 
 def resolve(name: str) -> Metric:
     try:
