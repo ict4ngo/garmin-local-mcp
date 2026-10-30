@@ -17,6 +17,7 @@
 - Raise `garminconnect` to `>=0.3.19,<0.4` by Task 3; upstream added `get_daily_movement()` in 0.3.19.
 - Use plain PostgreSQL; do not add TimescaleDB unless measurements later justify it.
 - Keep PostgreSQL private to Compose; expose only the bearer-protected MCP HTTP endpoint. Bind its host port to a configurable IP, defaulting to loopback; users set the homelab's private LAN IP in `.env` for remote clients.
+- Keep MCP SDK DNS-rebinding/Host validation enabled; allow only loopback and the configured private LAN IP plus published port.
 - Keep PostgreSQL data and the raw Garmin/token app data in separate persistent volumes.
 - Supply schedule and IANA timezone through Docker Compose/environment; the worker code must not contain a fallback schedule. Compose defaults to `06:00,18:00` and both values are editable through `.env` without rebuilding the image.
 - Automatic historical backfill is resumable, at most one Garmin request is in flight, waits 2 seconds between requests by default, and backs off exponentially after rate limits.
@@ -199,6 +200,23 @@
 - [ ] **Step 5: Verify Compose and CI.** Run `docker compose config`, full tests against `GARMIN_MCP_TEST_DATABASE_URL` (use a temporary PostgreSQL test service published only on loopback when running from the host), then `docker compose up -d` for the deployment smoke test. CI must run all DB tests against PostgreSQL on Ubuntu and parser/config/auth tests on Windows; run Ruff and `uv lock --check`.
 - [ ] **Step 6: Verify persistence** by writing a sample/raw snapshot, recreating app and PostgreSQL containers without removing volumes, and checking the sample and raw file remain available. Commit as `feat: add homelab Docker Compose deployment`.
 
+### Task 8: Allow the configured LAN Host without weakening DNS protection
+
+**Files:**
+- Modify: `src/garmin_mcp/http_auth.py`, `src/garmin_mcp/server.py`, `src/garmin_mcp/config.py`
+- Modify: `compose.yaml`, `.env.example`, `README.md`
+- Test: `tests/test_http_server.py`, `tests/test_deployment.py`
+
+**Interfaces:**
+- `create_http_app(mcp_server, expected_token, allowed_hosts)` configures `TransportSecuritySettings` with DNS-rebinding protection enabled and explicit host/origin allowlists before creating the Streamable HTTP app.
+- MCP runtime receives `GARMIN_MCP_LAN_IP` and `GARMIN_MCP_HTTP_PORT`; it allows that exact published Host plus loopback hosts, not arbitrary hosts.
+
+- [ ] **Step 1: Add failing HTTP/Compose tests** named `test_http_accepts_configured_lan_host`, `test_http_rejects_unlisted_host`, and `test_compose_passes_host_allowlist_inputs_to_mcp_only`. Assert valid bearer + configured LAN Host reaches MCP, valid bearer + unknown Host returns 421, missing bearer remains 401, and the worker does not receive HTTP-only variables.
+- [ ] **Step 2: Run the focused tests** against PostgreSQL/ASGI and confirm the LAN Host test fails with the SDK's current `Invalid Host header` response.
+- [ ] **Step 3: Implement explicit allowed hosts.** Derive host and published port from validated runtime configuration; include exact `<GARMIN_MCP_LAN_IP>:<GARMIN_MCP_HTTP_PORT>` and loopback patterns. Keep DNS rebinding protection enabled, bearer authentication outside it, and avoid a wildcard host allowlist.
+- [ ] **Step 4: Pass the LAN IP and published port only to the MCP service in Compose**, document that remote client URLs must use the configured LAN IP (not `localhost` or `0.0.0.0`), and retain the loopback default for private/local development.
+- [ ] **Step 5: Verify**: focused HTTP/deployment tests, the full PostgreSQL test suite, Ruff, lock check, `docker compose config`, and an HTTP smoke request using configured LAN Host plus a valid bearer. Confirm unknown Host remains rejected. Commit as `fix: allow configured LAN host for MCP HTTP`.
+
 ## Spec Coverage Self-Check
 
 - Native timestamped ingestion and raw retention: Task 3; source/FIT preservation and old SQLite rows: Task 2.
@@ -206,6 +224,7 @@
 - Twice-daily sync, throttled resumable history, restart behavior, and sync status: Task 5.
 - PostgreSQL service, separate raw/database volumes, and no host runtime dependencies: Tasks 1 and 7.
 - Authenticated remote Streamable HTTP for both clients plus retained stdio: Task 6; client configuration examples: Task 7.
+- Authenticated HTTP Host allowlist/DNS-rebinding boundary: Task 8.
 - Acceptance validation for parsers, query coverage, sync/backfill, migration, HTTP auth, Compose persistence, and docs is assigned to the corresponding task above.
 
 ## Execution Order and Handoff

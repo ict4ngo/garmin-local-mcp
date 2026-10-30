@@ -151,6 +151,9 @@ it can be throttled and allowed to take hours or days.
 - Require a configured bearer token for network MCP requests. Read the secret
   from runtime configuration/environment; never bake it into the image, expose
   it in logs, or provide a weak default. Reject missing and invalid tokens.
+- Keep the MCP SDK's DNS-rebinding/Host validation enabled. Explicitly allow the
+  loopback hosts plus the configured LAN IP and published host port; reject
+  unconfigured Host headers rather than disabling validation.
 - Provide a Docker/Compose deployment example with separate persistent
   PostgreSQL and app-data volumes, configurable port/schedule/timezone/token,
   and clear login/bootstrap steps. Schedule values must be visible and
