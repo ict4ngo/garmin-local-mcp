@@ -229,4 +229,4 @@
 
 ## Execution Order and Handoff
 
-Run Tasks 1–7 in order. Task 1 provides the database interface; Task 2 protects existing data; Tasks 3–5 build the temporal data path; Task 6 exposes it securely; Task 7 packages and documents the deployment. Keep every existing daily analysis test passing throughout the migration. After Task 7, run the complete CI commands, a Compose smoke test, and a final review against every acceptance item in the design spec.
+Run Tasks 1–8 in order. Task 1 provides the database interface; Task 2 protects existing data; Tasks 3–5 build the temporal data path; Task 6 adds authenticated HTTP; Task 7 packages the deployment; Task 8 configures FastMCP's Host allowlist for the Compose-published LAN address without disabling DNS-rebinding protection. Keep existing daily tools and tests passing. After Task 8, run the complete CI commands, a Compose smoke test, and a final review against every acceptance item in the design spec.
