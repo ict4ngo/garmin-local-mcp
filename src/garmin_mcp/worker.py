@@ -66,6 +66,63 @@ def _run_scheduled_sync(config: Config, conn: Connection, client, today: str) ->
     )
 
 
+def _initialize_scheduled_catchup(
+    config: Config, conn: Connection, today: str, last_run: str | None
+) -> None:
+    """Initialize the durable catch-up high-water mark once, before a schedule pass."""
+    if db.get_worker_state(conn, "scheduled_catchup_through") is not None:
+        return
+    target = datetime.fromisoformat(today).date() - timedelta(days=2)
+    if last_run is not None:
+        previous_run_date = _coerce_local(
+            datetime.fromisoformat(last_run), ZoneInfo(config.timezone)
+        ).date()
+        through = previous_run_date - timedelta(days=2)
+    else:
+        through = target
+    db.set_worker_state(conn, "scheduled_catchup_through", through.isoformat())
+
+
+def _report_has_errors(report: dict) -> bool:
+    return bool(report.get("aborted")) or any(
+        stats.get("error", 0) > 0 for stats in report.get("endpoints", {}).values()
+    )
+
+
+def _run_scheduled_catchup_step(
+    config: Config,
+    conn: Connection,
+    client,
+    *,
+    today: str,
+) -> bool:
+    """Process up to seven dates of outage recovery and persist only clean progress."""
+    through_text = db.get_worker_state(conn, "scheduled_catchup_through")
+    if through_text is None:
+        last_run = db.get_worker_state(conn, "last_scheduled_run")
+        _initialize_scheduled_catchup(config, conn, today, last_run)
+        through_text = db.get_worker_state(conn, "scheduled_catchup_through")
+
+    through = datetime.fromisoformat(through_text).date()
+    target = datetime.fromisoformat(today).date() - timedelta(days=2)
+    if through >= target:
+        return False
+
+    start = through + timedelta(days=1)
+    end = min(start + timedelta(days=6), target)
+    report = sync.sync_range(
+        config,
+        conn,
+        client,
+        start.isoformat(),
+        end.isoformat(),
+        progress=lambda _message: None,
+    )
+    if not _report_has_errors(report):
+        db.set_worker_state(conn, "scheduled_catchup_through", end.isoformat())
+    return True
+
+
 def _initialize_backfill(conn: Connection, today: str) -> None:
     newest = (datetime.fromisoformat(today).date() - timedelta(days=1)).isoformat()
     with conn.transaction():
@@ -207,10 +264,19 @@ def run_worker(
                 last_run = db.get_worker_state(conn, "last_scheduled_run")
                 if _schedule_is_due(now, config.sync_times, last_run):
                     try:
-                        _run_scheduled_sync(config, conn, client, today)
+                        _initialize_scheduled_catchup(config, conn, today, last_run)
+                        scheduled_report = _run_scheduled_sync(config, conn, client, today)
                         db.set_worker_state(conn, "last_scheduled_run", now.isoformat())
                     except Exception as exc:
                         print(f"scheduled sync failed: {exc}", file=sys.stderr)
+                    else:
+                        if not _report_has_errors(scheduled_report):
+                            try:
+                                _run_scheduled_catchup_step(
+                                    config, conn, client, today=today
+                                )
+                            except Exception as exc:
+                                print(f"scheduled catch-up failed: {exc}", file=sys.stderr)
                 elif config.backfill_enabled:
                     try:
                         _run_backfill_step(config, conn, client, today=today)

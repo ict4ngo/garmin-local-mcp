@@ -132,6 +132,13 @@ or to inspect status, use `docker compose run --rm mcp sync --from 2026-01-01`
 or `docker compose run --rm mcp status`. CLI commands use the same PostgreSQL
 settings and app-data volume as the services.
 
+Scheduled outage catch-up is separate from historical backfill: it resumes from
+its saved date in chunks of up to seven days and catches up through two days
+before the current local date. Long outages can therefore take time to clear;
+`sync_status` reports its `through`, `target`, and `pending_days`. Historical
+backfill independently searches older dates and stops after 90 consecutive
+empty days; it does not replace or reset scheduled catch-up progress.
+
 To migrate an existing SQLite warehouse, stop **every process that writes the
 old SQLite warehouse** before copying anything. This includes old app/worker
 processes and any other local writers. Copy the main database and any

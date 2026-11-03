@@ -279,3 +279,176 @@ def test_sync_advisory_lock_serializes_callers(config, postgres_connection, monk
     assert second_entered.is_set()
     first_conn.close()
     second_conn.close()
+
+
+def test_catchup_cursor_initializes_conservatively_from_last_run(
+    config, postgres_connection, monkeypatch
+):
+    conn = db.connect(config.database_url)
+    previous_run = datetime(2026, 6, 1, 18, 30, tzinfo=ZoneInfo(config.timezone))
+    db.set_worker_state(conn, "last_scheduled_run", previous_run.isoformat())
+    conn.execute("DELETE FROM worker_state WHERE key='scheduled_catchup_through'")
+    now = datetime(2026, 6, 3, 9, 0, tzinfo=ZoneInfo(config.timezone))
+    cursor_when_scheduled = []
+
+    def scheduled(_config, scheduled_conn, _client, _today):
+        cursor_when_scheduled.append(
+            db.get_worker_state(scheduled_conn, "scheduled_catchup_through")
+        )
+        return {"aborted": None, "endpoints": {}}
+
+    monkeypatch.setattr(worker, "_run_scheduled_sync", scheduled)
+    monkeypatch.setattr(worker, "_run_scheduled_catchup_step", lambda *a, **k: False)
+    stop_after_iteration(monkeypatch)
+
+    worker.run_worker(config, client_factory=lambda _tokens: EmptyClient(), clock=lambda: now)
+
+    assert cursor_when_scheduled == ["2026-05-30"]
+    conn.close()
+
+
+def test_catchup_cursor_defaults_to_recent_window_without_last_run(
+    config, postgres_connection, monkeypatch
+):
+    conn = db.connect(config.database_url)
+    conn.execute(
+        "DELETE FROM worker_state WHERE key IN ('last_scheduled_run', 'scheduled_catchup_through')"
+    )
+    now = datetime(2026, 6, 3, 9, 0, tzinfo=ZoneInfo(config.timezone))
+    cursor_when_scheduled = []
+
+    def scheduled(_config, scheduled_conn, _client, _today):
+        cursor_when_scheduled.append(
+            db.get_worker_state(scheduled_conn, "scheduled_catchup_through")
+        )
+        return {"aborted": None, "endpoints": {}}
+
+    monkeypatch.setattr(worker, "_run_scheduled_sync", scheduled)
+    monkeypatch.setattr(worker, "_run_scheduled_catchup_step", lambda *a, **k: False)
+    stop_after_iteration(monkeypatch)
+
+    worker.run_worker(config, client_factory=lambda _tokens: EmptyClient(), clock=lambda: now)
+
+    assert cursor_when_scheduled == ["2026-06-01"]
+    conn.close()
+
+
+def test_catchup_processes_at_most_seven_days(config, postgres_connection, monkeypatch):
+    conn = db.connect(config.database_url)
+    today = "2026-06-20"
+    db.set_worker_state(conn, "scheduled_catchup_through", "2026-06-01")
+    calls = []
+
+    def sync_range(_config, _conn, _client, start, end, **kwargs):
+        calls.append((start, end, kwargs))
+        return {"aborted": None, "endpoints": {}}
+
+    monkeypatch.setattr(sync, "sync_range", sync_range)
+
+    assert worker._run_scheduled_catchup_step(config, conn, EmptyClient(), today=today)
+
+    assert calls[0][:2] == ("2026-06-02", "2026-06-08")
+    assert not calls[0][2].get("force")
+    assert not calls[0][2].get("force_endpoints")
+    assert db.get_worker_state(conn, "scheduled_catchup_through") == "2026-06-08"
+    conn.close()
+
+
+def test_catchup_skips_ok_and_empty_endpoint_days(config, postgres_connection):
+    conn = db.connect(config.database_url)
+    today = "2026-06-10"
+    catchup_day = "2026-06-08"
+    db.set_worker_state(conn, "scheduled_catchup_through", "2026-06-07")
+    endpoints = [*worker.ENDPOINTS, *worker.SAMPLE_ENDPOINTS]
+    for index, endpoint in enumerate(endpoints):
+        db.mark_sync(conn, endpoint, catchup_day, "ok" if index % 2 else "empty")
+    client = EmptyClient()
+
+    assert worker._run_scheduled_catchup_step(config, conn, client, today=today)
+
+    assert client.calls == []
+    assert db.get_worker_state(conn, "scheduled_catchup_through") == catchup_day
+    conn.close()
+
+
+def test_catchup_retries_errors_without_advancing_cursor(config, postgres_connection, monkeypatch):
+    conn = db.connect(config.database_url)
+    db.set_worker_state(conn, "scheduled_catchup_through", "2026-06-07")
+    calls = []
+
+    def sync_range(_config, _conn, _client, start, end, **kwargs):
+        calls.append((start, end, kwargs))
+        return {"aborted": None, "endpoints": {"usersummary": {"error": 1}}}
+
+    monkeypatch.setattr(sync, "sync_range", sync_range)
+
+    assert worker._run_scheduled_catchup_step(
+        config, conn, EmptyClient(), today="2026-06-10"
+    )
+
+    assert calls[0][:2] == ("2026-06-08", "2026-06-08")
+    assert db.get_worker_state(conn, "scheduled_catchup_through") == "2026-06-07"
+    conn.close()
+
+
+def test_catchup_waits_until_next_schedule_after_failure(
+    config, postgres_connection, monkeypatch
+):
+    disabled_backfill = replace(config, backfill_enabled=False)
+    conn = db.connect(config.database_url)
+    db.set_worker_state(conn, "scheduled_catchup_through", "2026-05-31")
+    conn.close()
+    now = datetime(2026, 6, 3, 9, 0, tzinfo=ZoneInfo(config.timezone))
+    catchup_calls = []
+    sleep_calls = 0
+
+    monkeypatch.setattr(
+        worker,
+        "_run_scheduled_sync",
+        lambda *_args: {"aborted": None, "endpoints": {}},
+    )
+
+    def failed_catchup(_config, _conn, _client, start, end, **_kwargs):
+        catchup_calls.append((start, end))
+        return {"aborted": None, "endpoints": {"usersummary": {"error": 1}}}
+
+    monkeypatch.setattr(sync, "sync_range", failed_catchup)
+
+    def stop_after_second_iteration(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(worker, "_sleep", stop_after_second_iteration)
+    assert worker.run_worker(
+        disabled_backfill,
+        client_factory=lambda _tokens: EmptyClient(),
+        clock=lambda: now,
+    ) == 0
+
+    assert len(catchup_calls) == 1
+
+
+def test_due_scheduled_sync_precedes_catchup(config, postgres_connection, monkeypatch):
+    conn = db.connect(config.database_url)
+    db.set_worker_state(conn, "scheduled_catchup_through", "2026-05-31")
+    conn.close()
+    now = datetime(2026, 6, 3, 9, 0, tzinfo=ZoneInfo(config.timezone))
+    events = []
+
+    def scheduled(*_args):
+        events.append("scheduled")
+        return {"aborted": None, "endpoints": {}}
+
+    def catchup(_config, _conn, _client, start, end, **_kwargs):
+        events.append("catchup")
+        return {"aborted": None, "endpoints": {}}
+
+    monkeypatch.setattr(worker, "_run_scheduled_sync", scheduled)
+    monkeypatch.setattr(sync, "sync_range", catchup)
+    stop_after_iteration(monkeypatch)
+
+    worker.run_worker(config, client_factory=lambda _tokens: EmptyClient(), clock=lambda: now)
+
+    assert events == ["scheduled", "catchup"]

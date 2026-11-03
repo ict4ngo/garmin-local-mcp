@@ -96,6 +96,18 @@ it can be throttled and allowed to take hours or days.
   a documented way.
 - Report backfill coverage, progress, failures, and gaps. Do not imply that
   Garmin exposes complete minute-level history for every metric/account/device.
+- Recover recent sync dates missed during a worker outage. Keep the twice-daily
+  refresh for yesterday/today, and maintain a separate durable catch-up cursor
+  through older dates. Process catch-up in at most seven-day chunks, using
+  `sync_state` to skip already-successful (`ok`/`empty`) endpoint-days and retry
+  errors. Advance the cursor only when the whole chunk has no endpoint errors;
+  an interruption or failure must leave unfinished dates resumable. On upgrade,
+  conservatively replay the last scheduled two-day window; do not infer success
+  solely from `last_scheduled_run`, which records an attempt. Attempt at most
+  one catch-up chunk per scheduled cycle, after the recent refresh, so retries
+  cannot spin tightly or starve the regular schedule. Catch-up work must not
+  replace the separate historic backfill policy. Expose its cursor/target/
+  pending-day count in `sync_status`.
 
 ### Database and persistence
 

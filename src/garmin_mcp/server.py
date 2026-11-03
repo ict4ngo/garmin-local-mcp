@@ -17,6 +17,7 @@ from contextlib import closing
 from datetime import date as date_type
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP
 from psycopg import Connection
@@ -156,6 +157,25 @@ def sync_status() -> dict:
                ORDER BY source_endpoint"""
         ).fetchall()
         last_scheduled_run = db.get_worker_state(conn, "last_scheduled_run")
+        target = datetime.now(ZoneInfo(cfg.timezone)).date() - timedelta(days=2)
+        through_text = db.get_worker_state(conn, "scheduled_catchup_through")
+        if through_text is not None:
+            through = datetime.fromisoformat(through_text).date()
+        elif last_scheduled_run is not None:
+            previous_run = datetime.fromisoformat(last_scheduled_run)
+            zone = ZoneInfo(cfg.timezone)
+            if previous_run.tzinfo is None:
+                previous_run = previous_run.replace(tzinfo=zone)
+            else:
+                previous_run = previous_run.astimezone(zone)
+            through = previous_run.date() - timedelta(days=2)
+        else:
+            through = target
+        scheduled_catchup = {
+            "through": through.isoformat(),
+            "target": target.isoformat(),
+            "pending_days": max(0, (target - through).days),
+        }
         # Surfaced so an assistant never reports generated numbers as real
         # measurements. Absent for normal stores.
         generated = demo.is_demo(conn)
@@ -171,6 +191,7 @@ def sync_status() -> dict:
         "coverage": coverage,
         "schedule": {"times": list(cfg.sync_times), "timezone": cfg.timezone},
         "last_scheduled_run": last_scheduled_run,
+        "scheduled_catchup": scheduled_catchup,
         "backfill": {
             "enabled": cfg.backfill_enabled,
             "lower_bound": cfg.backfill_start_date,
