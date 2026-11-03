@@ -11,7 +11,9 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import closing
 from datetime import date, timedelta
+from datetime import datetime as datetime_type
 from pathlib import Path
 
 import pytest
@@ -165,6 +167,59 @@ def test_sync_status_reports_coverage(data_dir):
     assert "backfill" in res and "last_scheduled_run" in res
     assert "samples_coverage" in res
     assert "database_url" not in res and "tokens_dir" not in res
+
+
+def _freeze_server_local_date(monkeypatch):
+    class FrozenDateTime(datetime_type):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime_type(2026, 11, 3, 12, tzinfo=tz)
+
+    monkeypatch.setattr(server, "datetime", FrozenDateTime)
+
+
+def test_sync_status_reports_zero_catchup_backlog(data_dir, monkeypatch):
+    _freeze_server_local_date(monkeypatch)
+    with closing(db.connect(os.environ["GARMIN_MCP_DATABASE_URL"])) as conn:
+        db.set_worker_state(conn, "scheduled_catchup_through", "2026-11-01")
+
+    res = server.sync_status()
+
+    assert res["scheduled_catchup"] == {
+        "through": "2026-11-01",
+        "target": "2026-11-01",
+        "pending_days": 0,
+    }
+
+
+def test_sync_status_reports_pending_catchup_days(data_dir, monkeypatch):
+    _freeze_server_local_date(monkeypatch)
+    with closing(db.connect(os.environ["GARMIN_MCP_DATABASE_URL"])) as conn:
+        db.set_worker_state(conn, "scheduled_catchup_through", "2026-10-28")
+
+    res = server.sync_status()
+
+    assert res["scheduled_catchup"] == {
+        "through": "2026-10-28",
+        "target": "2026-11-01",
+        "pending_days": 4,
+    }
+
+
+def test_sync_status_derives_legacy_cursor_without_mutating_state(data_dir, monkeypatch):
+    _freeze_server_local_date(monkeypatch)
+    with closing(db.connect(os.environ["GARMIN_MCP_DATABASE_URL"])) as conn:
+        db.set_worker_state(conn, "last_scheduled_run", "2026-10-31T02:00:00+00:00")
+
+    res = server.sync_status()
+
+    assert res["scheduled_catchup"] == {
+        "through": "2026-10-28",
+        "target": "2026-11-01",
+        "pending_days": 4,
+    }
+    with closing(db.connect(os.environ["GARMIN_MCP_DATABASE_URL"])) as conn:
+        assert db.get_worker_state(conn, "scheduled_catchup_through") is None
 
 
 def test_import_fit_bad_folder_is_a_structured_error(data_dir, tmp_path):
